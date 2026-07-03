@@ -24,8 +24,11 @@ Or manually: download `Surf-<version>.zip` from the latest release and extract t
 `Surf` folder into `Documents\WindowsPowerShell\Modules\` (PS 5.1) or
 `Documents\PowerShell\Modules\` (PS 7).
 
-Then just type `surf` — PowerShell auto-loads the module. Fans of brevity can add
-`Set-Alias s surf` to their profile.
+Then just type `surf` — PowerShell auto-loads the module.
+
+The installer offers to add `s` as a shorthand alias to your profile (pass `-Alias` or
+`-NoAlias` when running it directly to skip the prompt). Gallery installs can add it
+manually: `Set-Alias s surf` in your profile.
 
 ## Usage
 

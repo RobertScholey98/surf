@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches module version
+        shell: pwsh
+        run: |
+          $manifest = Import-PowerShellDataFile ./Surf/Surf.psd1
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          if ($tag -ne $manifest.ModuleVersion) {
+            Write-Error "Tag ${{ github.ref_name }} does not match ModuleVersion $($manifest.ModuleVersion) in Surf.psd1 - bump the manifest first."
+            exit 1
+          }
+
+      - name: Build release zip
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Create GitHub release with zip
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $manifest = Import-PowerShellDataFile ./Surf/Surf.psd1
+          gh release create '${{ github.ref_name }}' "dist/Surf-$($manifest.ModuleVersion).zip" --title '${{ github.ref_name }}' --generate-notes
+
+      - name: Publish to PowerShell Gallery
+        shell: pwsh
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+        run: |
+          if (-not $env:PSGALLERY_API_KEY) {
+            Write-Host 'PSGALLERY_API_KEY secret not set - skipping Gallery publish.'
+            exit 0
+          }
+          Publish-Module -Path ./Surf -NuGetApiKey $env:PSGALLERY_API_KEY

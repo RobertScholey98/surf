@@ -6,6 +6,13 @@
 #
 # Installs into the current-user module path for whichever PowerShell edition is running,
 # so it works from both Windows PowerShell 5.1 and PowerShell 7.
+#
+# Offers to add "Set-Alias s surf" to your profile; use -Alias or -NoAlias to skip the prompt.
+
+param(
+    [switch]$Alias,     # add the 's' alias to your profile without asking
+    [switch]$NoAlias    # never touch the profile
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -48,4 +55,39 @@ if ($localModule -and (Test-Path (Join-Path $localModule 'Surf.psd1'))) {
 Get-ChildItem -Recurse $dest | Unblock-File -ErrorAction SilentlyContinue
 
 Write-Host "Surf installed to $dest" -ForegroundColor Green
-Write-Host "Type 'surf' in a new PowerShell session to start. Optional: add 'Set-Alias s surf' to your profile."
+
+# ---- optional 's' shorthand alias ---------------------------------------
+$wantAlias = $false
+if ($Alias) { $wantAlias = $true }
+elseif (-not $NoAlias) {
+    # only prompt when someone can actually answer
+    $nonInteractive = [Environment]::GetCommandLineArgs() -contains '-NonInteractive'
+    if (-not $nonInteractive) {
+        $answer = Read-Host "Add 's' as a shorthand alias for surf in your PowerShell profile? (y/n)"
+        $wantAlias = $answer -match '^y'
+    }
+}
+
+$aliasAdded = $false
+if ($wantAlias) {
+    $aliasLine = 'Set-Alias -Name s -Value surf'
+    $existingProfile = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw } else { '' }
+    if ($existingProfile -match '(?m)^\s*Set-Alias\s+(-Name\s+)?s\b') {
+        Write-Host "Your profile already defines an 's' alias - left as is."
+        $aliasAdded = $true
+    } else {
+        $existingCmd = Get-Command s -ErrorAction SilentlyContinue
+        if ($existingCmd -and $existingCmd.Definition -ne 'surf') {
+            Write-Host "Skipped the alias: 's' already means '$($existingCmd.Definition)' in your setup." -ForegroundColor Yellow
+        } else {
+            $profileDir = Split-Path -Parent $PROFILE
+            if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Force -Path $profileDir | Out-Null }
+            Add-Content -Path $PROFILE -Value $aliasLine
+            Write-Host "Added '$aliasLine' to $PROFILE" -ForegroundColor Green
+            $aliasAdded = $true
+        }
+    }
+}
+
+if ($aliasAdded) { Write-Host "Type 'surf' (or 's') in a new PowerShell session to start." }
+else { Write-Host "Type 'surf' in a new PowerShell session to start. Optional: add 'Set-Alias s surf' to your profile." }

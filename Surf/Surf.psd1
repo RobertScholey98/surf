@@ -1,6 +1,6 @@
 @{
     RootModule           = 'Surf.psm1'
-    ModuleVersion        = '0.1.0'
+    ModuleVersion        = '0.1.1'
     GUID                 = 'ffbb58b2-9820-4242-85ec-50fb26b0fc9f'
     Author               = 'Rob Scholey'
     Copyright            = '(c) 2026 Rob Scholey. All rights reserved.'
