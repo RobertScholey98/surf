@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint (PSScriptAnalyzer)
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $results = Invoke-ScriptAnalyzer -Path ./Surf -Recurse -Severity Warning,Error
+          $results | Format-Table -AutoSize
+          if ($results | Where-Object Severity -eq 'Error') { exit 1 }
+
+      - name: Import on PowerShell 7
+        shell: pwsh
+        run: |
+          Import-Module ./Surf/Surf.psd1 -Force
+          if (-not (Get-Command surf)) { exit 1 }
+          'imported OK on PS ' + $PSVersionTable.PSVersion
+
+      - name: Import on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          Import-Module ./Surf/Surf.psd1 -Force
+          if (-not (Get-Command surf)) { exit 1 }
+          'imported OK on PS ' + $PSVersionTable.PSVersion
