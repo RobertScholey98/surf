@@ -26,6 +26,12 @@ jobs:
           if (-not (Get-Command surf)) { exit 1 }
           'imported OK on PS ' + $PSVersionTable.PSVersion
 
+      - name: Pester tests
+        shell: pwsh
+        run: |
+          Install-Module Pester -Force -Scope CurrentUser -SkipPublisherCheck
+          Invoke-Pester -Path ./tests -CI
+
       - name: Import on Windows PowerShell 5.1
         shell: powershell
         run: |
