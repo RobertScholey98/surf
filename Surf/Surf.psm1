@@ -293,6 +293,150 @@ function Remove-SurfCommand {
     return @{ Ok = $true; Error = $null }
 }
 
+# ---- git worktrees --------------------------------------------------------
+# Pure parsers and planners for the worktree management area. Nothing here
+# touches git or the filesystem; the TUI feeds in command output and executes
+# the returned plans.
+
+# Parses `git worktree list --porcelain` output. First block is the main
+# worktree. Paths come back with git's forward slashes; normalised to Windows.
+function ConvertFrom-SurfWorktreeList {
+    param(
+        [string]$Text,
+        [string]$CurrentDir
+    )
+    $result = @()
+    foreach ($block in ($Text -split "(`r`n|`n){2,}")) {
+        if ($block -notmatch '(?m)^worktree (.+)$') { continue }
+        $wtPath = $Matches[1].Trim().Replace('/', '\')
+        $branch = $null
+        if ($block -match '(?m)^branch refs/heads/(.+)$') { $branch = $Matches[1].Trim() }
+        $result += ,([pscustomobject]@{
+            Path      = $wtPath
+            Branch    = $branch
+            IsMain    = ($result.Count -eq 0)
+            IsCurrent = $false
+        })
+    }
+    # the current worktree is the one whose path is the longest prefix of
+    # CurrentDir (on a path-segment boundary): a worktree nested inside the
+    # main one must win over its container
+    if ($CurrentDir) {
+        $cur = $CurrentDir.TrimEnd('\')
+        $best = $null
+        foreach ($wt in $result) {
+            $p = $wt.Path.TrimEnd('\')
+            $isUnder = $cur.Equals($p, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $cur.StartsWith("$p\", [System.StringComparison]::OrdinalIgnoreCase)
+            if ($isUnder -and (-not $best -or $p.Length -gt $best.Path.TrimEnd('\').Length)) { $best = $wt }
+        }
+        if ($best) { $best.IsCurrent = $true }
+    }
+    return $result
+}
+
+# Both branch pickers feed the same UI: entries of {Display, Branch}.
+
+# `gh pr list --json number,title,headRefName` output (gh orders newest first).
+function ConvertFrom-SurfPrJson {
+    param([string]$Json)
+    if (-not $Json -or -not $Json.Trim()) { return @() }
+    $prs = ConvertFrom-Json -InputObject $Json
+    $result = @()
+    foreach ($pr in @($prs)) {
+        $result += ,([pscustomobject]@{
+            Display = ('#{0} {1} [{2}]' -f $pr.number, $pr.title, $pr.headRefName)
+            Branch  = $pr.headRefName
+        })
+    }
+    return $result
+}
+
+# `git ls-remote --heads <remote>` output: "<sha>TABrefs/heads/<name>" per line.
+function ConvertFrom-SurfRemoteHeads {
+    param([string]$Text)
+    $branches = @()
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match "`t?refs/heads/(.+)$") { $branches += $Matches[1].Trim() }
+    }
+    $result = @()
+    foreach ($b in ($branches | Sort-Object)) {
+        $result += ,([pscustomobject]@{ Display = $b; Branch = $b })
+    }
+    return $result
+}
+
+# Plans a worktree add without touching git. Kind 'local' creates a new branch
+# from BaseRef; kind 'remote' checks out Remote's branch, tracking it. Returns
+# @{ Ok; Error; WorktreePath; Steps } where Steps is a list of git arg arrays
+# for the caller to execute in order.
+function Resolve-SurfWorktreeAddPlan {
+    param(
+        [string]$Kind,
+        [string]$BranchName,
+        [string]$BaseRef,
+        [string]$RepoRoot,
+        [string]$RelativePath,
+        [string[]]$ExistingBranches = @(),
+        [string[]]$ExistingWorktreePaths = @(),
+        [string]$Remote = 'origin'
+    )
+    # the common git check-ref-format rules; git would refuse these anyway, but
+    # a footer-sized error beats raw git stderr
+    if (-not $BranchName -or -not $BranchName.Trim() -or
+        $BranchName -match '[\s~^:?*\[\\]' -or $BranchName -match '\.\.' -or
+        $BranchName -match '^[-/]' -or $BranchName -match '[/.]$' -or
+        $BranchName -match '\.lock$' -or $BranchName -match '@\{') {
+        return @{ Ok = $false; Error = "'$BranchName' is not a valid branch name."; WorktreePath = $null; Steps = $null }
+    }
+    $clash = @($ExistingBranches | Where-Object { $_ -eq $BranchName })
+    if ($clash) {
+        return @{ Ok = $false; Error = "A branch named '$BranchName' already exists."; WorktreePath = $null; Steps = $null }
+    }
+    # blank path = the branch name, with path separators flattened so
+    # 'feat/dark-mode' lands in one folder rather than a feat\ subtree
+    $rel = if ($RelativePath -and $RelativePath.Trim()) { $RelativePath.Trim() }
+           else { $BranchName -replace '[/\\]', '-' }
+    $wtPath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($RepoRoot, $rel))
+    $taken = @($ExistingWorktreePaths | Where-Object {
+        $_.TrimEnd('\').Equals($wtPath.TrimEnd('\'), [System.StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($taken) {
+        return @{ Ok = $false; Error = "A worktree already lives at '$wtPath'."; WorktreePath = $null; Steps = $null }
+    }
+    $steps = @()
+    if ($Kind -eq 'local') {
+        $steps += ,@('worktree', 'add', '-b', $BranchName, $wtPath, $BaseRef)
+    } else {
+        $steps += ,@('fetch', $Remote, $BranchName)
+        $steps += ,@('worktree', 'add', '--track', '-b', $BranchName, $wtPath, "$Remote/$BranchName")
+    }
+    return @{ Ok = $true; Error = $null; WorktreePath = $wtPath; Steps = $steps }
+}
+
+# Plans a worktree removal: the worktree goes, then its local branch. The
+# branch is released-or-abandoned by definition, so -D with no unmerged nag;
+# the one guard is uncommitted changes, surfaced as RequiresForce until the
+# caller confirms with -Force.
+function Resolve-SurfWorktreeRemovePlan {
+    param(
+        $Worktree,
+        [bool]$IsDirty,
+        [switch]$Force
+    )
+    if ($Worktree.IsMain) {
+        return @{ Ok = $false; Error = 'The main worktree cannot be removed.'; RequiresForce = $false; Steps = $null }
+    }
+    if ($IsDirty -and -not $Force) {
+        return @{ Ok = $true; Error = $null; RequiresForce = $true; Steps = $null }
+    }
+    $steps = @()
+    if ($IsDirty) { $steps += ,@('worktree', 'remove', '--force', $Worktree.Path) }
+    else { $steps += ,@('worktree', 'remove', $Worktree.Path) }
+    if ($Worktree.Branch) { $steps += ,@('branch', '-D', $Worktree.Branch) }
+    return @{ Ok = $true; Error = $null; RequiresForce = $false; Steps = $steps }
+}
+
 function surf {
     param(
         [Parameter(Position = 0)][string]$Command,
