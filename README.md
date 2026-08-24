@@ -1,8 +1,8 @@
 # Surf
 
 An interactive directory navigator for the Windows terminal. Browse folders with the
-arrow keys, hit Enter to `cd` there. Favourites, a blacklist, recursive search, and
-Windows Terminal tab integration included.
+arrow keys, hit Enter to `cd` there. Favourites, a blacklist, recursive search, git
+worktree management, and Windows Terminal tab integration included.
 
 <!-- TODO: demo GIF here -->
 
@@ -54,6 +54,7 @@ entry at the bottom.
 | `B` | Blacklist the highlighted item (hide from listings) |
 | `T` | Open highlighted folder in a new Windows Terminal tab |
 | `S` | Recursive folder search under the current directory |
+| `W` | Git worktree management area (inside a git repo) |
 | `Del` | Delete the highlighted item to the Recycle Bin (asks Y/N) |
 | `Space` | Mark/un-mark the highlighted item (marks pin to the top and survive navigation) |
 | `/` then a letter | Jump to the next folder starting with that letter |
@@ -100,7 +101,7 @@ The cockpit workflow this enables:
 
 ```powershell
 surf add d "yarn dev" -Background
-surf add w "yarn test --watch" -Background
+surf add yw "yarn test --watch" -Background
 surf add cc "claude" -Pane
 ```
 
@@ -131,6 +132,33 @@ help` and the `?` overlay all reflect your keymap.
 In the blacklist view: `B` un-lists, `Enter` cds there, `Right` browses into it.
 In search: type the query, `Enter` runs it (first 200 matches), `Esc` cancels;
 in the results `Left`/`Esc` return to browsing.
+
+## Git worktrees
+
+Anywhere inside a git repo, `W` opens the worktree management area: every worktree
+listed with its branch (main first, the one you're standing in pre-selected), so the
+worktree commands you can never remember become four keys:
+
+- **Enter** — browse into the selected worktree.
+- **N** — new local branch + worktree. Prompts for a branch name, a base ref
+  (plain Enter means the *latest* default branch — surf fetches origin and uses
+  `origin/HEAD`), and a path relative to the repo root, pre-filled with the branch
+  name. The new branch gets no upstream until you push it.
+- **R** — check out a remote branch into a new worktree, for looking at someone
+  else's PR. With the [GitHub CLI](https://cli.github.com/) installed the picker
+  lists open PRs as `#123 title [branch]`; without it, every remote branch. The
+  local branch tracks the remote, so `git pull` follows the author's updates.
+- **D** — remove the selected worktree *and* delete its local branch, after a
+  confirm that names both. If the worktree has uncommitted changes there's a second
+  explicit confirm; there is no unmerged-branch nag beyond that — a removed
+  worktree's branch is released-or-abandoned by definition. Removing the worktree
+  you're standing in lands you back in the main worktree. The main worktree itself
+  is never removable.
+
+Stale worktree registrations are pruned automatically whenever the list is built, so
+manually deleted folders never linger as ghosts. While browsing a repo with linked
+worktrees, they also show as a pinned `worktrees (n)` group in every listing —
+navigation only, with `(main)` and `(here)` markers.
 
 ## Where things live
 

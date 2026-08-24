@@ -1,6 +1,6 @@
 @{
     RootModule           = 'Surf.psm1'
-    ModuleVersion        = '0.3.1'
+    ModuleVersion        = '0.4.0'
     GUID                 = 'ffbb58b2-9820-4242-85ec-50fb26b0fc9f'
     Author               = 'Rob Scholey'
     Copyright            = '(c) 2026 Rob Scholey. All rights reserved.'
@@ -16,7 +16,7 @@
             Tags         = @('TUI', 'navigation', 'filesystem', 'directory', 'interactive', 'Windows')
             LicenseUri   = 'https://github.com/RobertScholey98/surf/blob/main/LICENSE'
             ProjectUri   = 'https://github.com/RobertScholey98/surf'
-            ReleaseNotes = '0.3.1: fix crash on launch under Windows PowerShell 5.1 (the background-process table triggered a 5.1-only "Argument types do not match" error when listing any directory).'
+            ReleaseNotes = '0.4.0: git worktree management. W opens a worktree area inside any git repo: Enter browses into a worktree, N creates a new local branch+worktree (Enter at the base prompt means latest default branch, fetched), R checks out a remote branch or open PR (via gh when installed) into a new worktree, D removes a worktree AND its local branch behind confirms (extra confirm on uncommitted changes; main worktree never removable). Stale registrations auto-prune; linked worktrees show as a pinned group while browsing the repo.'
         }
     }
 }

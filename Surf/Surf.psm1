@@ -44,6 +44,16 @@
 #   Space            mark/un-mark the highlighted folder or file. Marks pin to a
 #                    group at the top of every listing, survive navigation, and feed
 #                    {selected}; Esc clears them all
+#   W                worktree management area (inside a git repo): every worktree
+#                    listed with its branch, the one you're in pre-selected. Enter
+#                    browses into a worktree, N creates a new local branch+worktree
+#                    (base ref prompt - Enter means latest default branch, fetched),
+#                    R checks out a remote branch or open PR (via gh when installed)
+#                    into a new worktree, D removes the selected worktree AND its
+#                    local branch after a confirm (a second confirm if it has
+#                    uncommitted changes; the main worktree is never removable).
+#                    Esc/W back. In browse, linked worktrees show as a pinned
+#                    "worktrees (n)" group - navigation only.
 #   /                then a letter: jump to the next folder starting with it
 #   a-z / 0-9        run the custom command bound to that key (see surf add); a chain
 #                    prefix opens a which-key menu of its completions
@@ -184,7 +194,7 @@ function Remove-SurfAnsi {
 # Built-in letter actions are rebindable; keymap.json stores the full action->key map.
 
 function Get-SurfDefaultKeymap {
-    @{ blacklist = 'b'; favourite = 'f'; search = 's'; tab = 't'; quit = 'q'; kill = 'k' }
+    @{ blacklist = 'b'; favourite = 'f'; search = 's'; tab = 't'; quit = 'q'; kill = 'k'; worktrees = 'w' }
 }
 
 function Get-SurfKeymap {
@@ -204,7 +214,7 @@ function Get-SurfKeymap {
     # claimed before that action existed (e.g. a pre-0.3.0 keymap.json rebound a
     # built-in to 'k' before kill shipped) moves to a free letter instead of
     # silently double-binding one key to two actions.
-    $actions = @('blacklist', 'favourite', 'search', 'tab', 'quit', 'kill')
+    $actions = @('blacklist', 'favourite', 'search', 'tab', 'quit', 'kill', 'worktrees')
     foreach ($action in $actions) {
         if ($savedNames -contains $action) { continue }
         $clash = @($actions | Where-Object { $_ -ne $action -and $km[$_] -eq $km[$action] })
@@ -437,6 +447,94 @@ function Resolve-SurfWorktreeRemovePlan {
     return @{ Ok = $true; Error = $null; RequiresForce = $false; Steps = $steps }
 }
 
+# The one choke point that shells out to git. -C keeps surf's own location out
+# of it; stderr merges into Output so callers get git's words on failure.
+function Invoke-SurfGit {
+    param([string]$Dir, [string[]]$GitArgs)
+    try {
+        $out = & git -C $Dir @GitArgs 2>&1
+        $lines = @($out | ForEach-Object { "$_" })
+        return @{ Ok = ($LASTEXITCODE -eq 0); Output = ($lines -join "`n"); ExitCode = $LASTEXITCODE }
+    } catch {
+        return @{ Ok = $false; Output = $_.Exception.Message; ExitCode = -1 }
+    }
+}
+
+# Cheap repo test: walk up looking for a .git directory (main worktree) or
+# .git file (linked worktree) so directories outside any repo never pay for a
+# git process launch.
+function Find-SurfGitMarker {
+    param([string]$Dir)
+    $d = $Dir
+    while ($d) {
+        if (Test-Path -LiteralPath (Join-Path $d '.git')) { return $d }
+        $d = [System.IO.Path]::GetDirectoryName($d)
+    }
+    return $null
+}
+
+# Worktree state for a directory: $null when not inside a git repo. -Prune
+# first drops stale registrations so ghost entries never surface.
+function Get-SurfWorktreeState {
+    param([string]$Dir, [switch]$Prune)
+    if (-not (Find-SurfGitMarker -Dir $Dir)) { return $null }
+    if ($Prune) { $null = Invoke-SurfGit -Dir $Dir -GitArgs @('worktree', 'prune') }
+    $r = Invoke-SurfGit -Dir $Dir -GitArgs @('worktree', 'list', '--porcelain')
+    if (-not $r.Ok) { return $null }
+    $wts = @(ConvertFrom-SurfWorktreeList -Text $r.Output -CurrentDir $Dir)
+    if ($wts.Count -eq 0) { return $null }
+    return @{ MainRoot = $wts[0].Path; Worktrees = $wts }
+}
+
+function Get-SurfLocalBranches {
+    param([string]$Dir)
+    $r = Invoke-SurfGit -Dir $Dir -GitArgs @('for-each-ref', 'refs/heads', '--format=%(refname:short)')
+    if (-not $r.Ok) { return @() }
+    return @($r.Output -split "`r?`n" | Where-Object { $_.Trim() })
+}
+
+# "Latest master": fetch origin, then origin/HEAD -> origin/main -> origin/master;
+# with no remote, fall back to the local default branch. $null when nothing fits.
+function Resolve-SurfDefaultBase {
+    param([string]$Dir)
+    $remotes = Invoke-SurfGit -Dir $Dir -GitArgs @('remote')
+    if ($remotes.Ok -and $remotes.Output.Trim()) {
+        $null = Invoke-SurfGit -Dir $Dir -GitArgs @('fetch', 'origin')
+        $head = Invoke-SurfGit -Dir $Dir -GitArgs @('rev-parse', '--abbrev-ref', 'origin/HEAD')
+        if ($head.Ok -and $head.Output.Trim() -match '^origin/.') { return $head.Output.Trim() }
+        foreach ($cand in @('origin/main', 'origin/master')) {
+            $v = Invoke-SurfGit -Dir $Dir -GitArgs @('rev-parse', '--verify', '--quiet', $cand)
+            if ($v.Ok) { return $cand }
+        }
+    }
+    foreach ($cand in @('main', 'master')) {
+        $v = Invoke-SurfGit -Dir $Dir -GitArgs @('rev-parse', '--verify', '--quiet', $cand)
+        if ($v.Ok) { return $cand }
+    }
+    return $null
+}
+
+# Branch picker source: open PRs via gh when it's installed and works,
+# otherwise every remote branch. Returns @{ Entries; Source } with Source
+# 'pr' or 'remote' so the UI can title the list honestly.
+function Get-SurfBranchPicker {
+    param([string]$Dir)
+    if (Get-Command gh -ErrorAction SilentlyContinue) {
+        try {
+            Push-Location -LiteralPath $Dir
+            $json = & gh pr list --state open --limit 100 --json number,title,headRefName 2>$null
+            $ghOk = ($LASTEXITCODE -eq 0)
+        } catch { $ghOk = $false } finally { Pop-Location }
+        if ($ghOk) {
+            $entries = @(ConvertFrom-SurfPrJson -Json ($json -join "`n"))
+            if ($entries.Count -gt 0) { return @{ Entries = $entries; Source = 'pr' } }
+        }
+    }
+    $r = Invoke-SurfGit -Dir $Dir -GitArgs @('ls-remote', '--heads', 'origin')
+    if (-not $r.Ok) { return @{ Entries = @(); Source = 'remote' } }
+    return @{ Entries = @(ConvertFrom-SurfRemoteHeads -Text $r.Output); Source = 'remote' }
+}
+
 function surf {
     param(
         [Parameter(Position = 0)][string]$Command,
@@ -500,6 +598,14 @@ function surf {
             $name = if ([System.IO.Path]::GetDirectoryName($m) -eq $dir) { [System.IO.Path]::GetFileName($m) } else { $m }
             $list.Add((New-SurfEntry $name 'mark' $m))
         }
+        # inside a repo with linked worktrees, a glanceable group: which
+        # worktrees exist and which one we're in. Navigation only - add/remove
+        # live in the management area (the worktrees key).
+        $ws = Get-SurfWorktreeState -Dir $dir
+        if ($ws -and @($ws.Worktrees).Count -gt 1) {
+            $list.Add((New-SurfEntry ('worktrees ({0})' -f @($ws.Worktrees).Count) 'none' ''))
+            foreach ($row in (Get-SurfWorktreeRowEntries $ws)) { $list.Add($row) }
+        }
         $blDirs = 0; $blFiles = 0
         $favD = @(); $normD = @(); $favF = @(); $normF = @()
         foreach ($d in @($items | Where-Object { $_.PSIsContainer } | Sort-Object Name)) {
@@ -520,6 +626,29 @@ function surf {
                 $blDirs, $(if ($blDirs -ne 1) { 's' }), $blFiles, $(if ($blFiles -ne 1) { 's' })
             $list.Add((New-SurfEntry $label 'blfolder' $dir))
         }
+        return ,$list
+    }
+
+    # One row per worktree: "leaf [branch]" with main/here markers. Used by the
+    # browse group and the management area alike; FullPath keeps Enter, T and
+    # {hovered} meaningful on these rows.
+    function Get-SurfWorktreeRowEntries($state) {
+        $rows = @()
+        foreach ($wt in @($state.Worktrees)) {
+            $leaf = [System.IO.Path]::GetFileName($wt.Path)
+            if (-not $leaf) { $leaf = $wt.Path }
+            $branch = if ($wt.Branch) { $wt.Branch } else { 'detached' }
+            $name = "$leaf [$branch]"
+            if ($wt.IsMain) { $name += '  (main)' }
+            if ($wt.IsCurrent) { $name += '  (here)' }
+            $rows += ,([pscustomobject]@{ Name = $name; Kind = 'wt'; FullPath = $wt.Path; Fav = $false; Date = $null; Wt = $wt })
+        }
+        return ,$rows
+    }
+
+    function Get-SurfWorktreeMenuEntries($state) {
+        $list = New-Object System.Collections.Generic.List[object]
+        foreach ($row in (Get-SurfWorktreeRowEntries $state)) { $list.Add($row) }
         return ,$list
     }
 
@@ -572,6 +701,10 @@ function surf {
     $helpPrev    = $null                 # view to restore when the ? overlay closes
     $procTable   = New-Object System.Collections.Generic.List[object]   # background SurfJobs, session-scoped
     $confirmQuit = $null                 # pending exit awaiting Y/N because processes are running
+    $wtState     = $null                 # repo worktree state while the management area is open
+    $wtPrev      = $null                 # view to restore when the management area closes
+    $wtFlow      = $null                 # chained add prompts: @{Kind; Stage; Branch; Base; Input}
+    $confirmWt   = $null                 # worktree removal awaiting Y/N: @{Wt; Stage}
 
     function Test-SurfProcsRunning {
         foreach ($pe in $procTable) { if (-not $pe.Job.HasExited) { return $true } }
@@ -585,6 +718,7 @@ function surf {
         $list.Add((New-SurfEntry ('  {0} favourite   {1} blacklist   {2} new tab   {3} search' -f `
             $keymap.favourite.ToUpper(), $keymap.blacklist.ToUpper(), $keymap.tab.ToUpper(), $keymap.search.ToUpper()) 'none' ''))
         $list.Add((New-SurfEntry ('  / jump   Del delete   ? help   Esc/{0} quit' -f $keymap.quit.ToUpper()) 'none' ''))
+        $list.Add((New-SurfEntry ('  {0} worktrees (in a git repo): Enter browse   N new local   R remote/PR   D remove worktree+branch' -f $keymap.worktrees.ToUpper()) 'none' ''))
         $list.Add((New-SurfEntry ('  process rows: Enter attach   {0} kill/dismiss   (attached: Ctrl+C stop, Esc Esc detach, PgUp history)' -f $keymap.kill.ToUpper()) 'none' ''))
         $list.Add((New-SurfEntry '' 'none' ''))
         $list.Add((New-SurfEntry 'Custom commands  (surf add <key> "<command>", surf remove <key>)' 'none' ''))
@@ -787,6 +921,19 @@ function surf {
         }
     }
 
+    # Dot-invoked: closes the worktree management area back to the prior view.
+    # A browse view is rebuilt rather than restored - add/remove changed it.
+    $CloseWorktreeArea = {
+        if ($wtPrev -and $wtPrev.Mode -ne 'browse') {
+            $mode = $wtPrev.Mode; $entries = $wtPrev.Entries
+            $cursor = $wtPrev.Cursor; $scroll = $wtPrev.Scroll
+        } else {
+            try { $entries = Get-SurfListing $path } catch { }
+            $mode = 'browse'; $cursor = 0; $scroll = 0
+        }
+        $wtPrev = $null; $wtState = $null; $wtFlow = $null
+    }
+
     # Dot-invoked (. $RunCustomCommand) so assignments land in this scope.
     # Expects $cmdToRun; sets $pendingRun for exit mode, runs contained inline.
     $RunCustomCommand = {
@@ -922,6 +1069,7 @@ function surf {
                 Write-Host ('  {0} favourite   {1} blacklist   {2} new tab   {3} search   Del delete   Esc/{4} quit' -f `
                     $km.favourite.ToUpper(), $km.blacklist.ToUpper(), $km.tab.ToUpper(), $km.search.ToUpper(), $km.quit.ToUpper())
                 Write-Host ('  On a process row: Enter attach   {0} kill/dismiss. Attached: Ctrl+C stop, Esc Esc detach, PgUp history' -f $km.kill.ToUpper())
+                Write-Host ('  {0} worktrees (in a git repo): Enter browse   N new local   R checkout remote/PR   D remove worktree+branch' -f $km.worktrees.ToUpper())
                 Write-Host ''
                 Write-Host 'Custom commands:' -ForegroundColor Cyan
                 $cmds = @(Get-SurfCommandTable -Path $script:SurfCommandsFile)
@@ -982,6 +1130,9 @@ function surf {
                 'blacklist' { if ($blScope) { "surf-blocklist: $blScope" } else { 'Blacklist' } }
                 'results'   { "Search '$searchQuery': $path" }
                 'help'      { 'Help' }
+                'worktrees' { "Worktrees: $($wtState.MainRoot)" }
+                'wt-input'  { "Worktrees: $($wtState.MainRoot)" }
+                'wt-pick'   { if ($wtFlow -and $wtFlow.Source -eq 'pr') { 'Open pull requests' } else { 'Remote branches' } }
                 default     { $path }
             }
             $pos = "($($cursor + 1)/$($entries.Count))"
@@ -1018,6 +1169,11 @@ function surf {
                             if (Test-Path -LiteralPath $e.FullPath -PathType Container) { $hint = "  $arrow navigate  $ret CD into" }
                             else { $hint = '  Space un-mark' }
                         }
+                        elseif ($e.Kind -eq 'wt') {
+                            if ($mode -eq 'worktrees') { $hint = "  $ret browse" }
+                            else { $hint = "  $arrow navigate  $ret CD into" }
+                        }
+                        elseif ($e.Kind -eq 'wtpick') { $hint = "  $ret checkout" }
                         elseif ($e.Kind -ne 'file' -and $e.Kind -ne 'none') {
                             $hint = "  $arrow navigate  $ret CD into"
                         }
@@ -1043,6 +1199,8 @@ function surf {
                         else { Write-Host $line -ForegroundColor Green }
                     } elseif ($e.Kind -eq 'mark') {
                         Write-Host $line -ForegroundColor Magenta
+                    } elseif ($e.Kind -eq 'wt') {
+                        Write-Host $line -ForegroundColor Cyan
                     } elseif ($e.Fav) {
                         Write-Host $line -ForegroundColor Yellow
                     } elseif ($e.Kind -eq 'file' -or $e.Kind -eq 'none') {
@@ -1079,6 +1237,19 @@ function surf {
 
             $footer = if ($confirmQuit) { " $((@($procTable | Where-Object { -not $_.Job.HasExited })).Count) process(es) running - stop them and leave?   Y / N" }
                       elseif ($confirmDelete) { " Delete '$($confirmDelete.Name)' (to Recycle Bin)?   Y / N" }
+                      elseif ($confirmWt) {
+                          $wtLeaf = [System.IO.Path]::GetFileName($confirmWt.Wt.Path)
+                          if ($confirmWt.Stage -eq 'force') { " '$wtLeaf' has uncommitted changes - remove anyway?   Y / N" }
+                          elseif ($confirmWt.Wt.Branch) { " Remove worktree '$wtLeaf' and delete branch '$($confirmWt.Wt.Branch)'?   Y / N" }
+                          else { " Remove worktree '$wtLeaf'?   Y / N" }
+                      }
+                      elseif ($mode -eq 'wt-input') {
+                          switch ($wtFlow.Stage) {
+                              'branch' { " New branch name: $($wtFlow.Input)" + '_   (Enter next, Esc back)' }
+                              'base'   { " Base ref: $($wtFlow.Input)" + '_   (Enter = latest default branch, Esc back)' }
+                              default  { " Path (relative to repo root): $($wtFlow.Input)" + '_   (Enter create, Esc back)' }
+                          }
+                      }
                       elseif ($mode -eq 'search-input') { " Search: $searchQuery" + '_   (Enter search, Esc cancel)' }
                       elseif ($chainPending) { " chain [$chainPending]   press the next key   Esc cancel" }
                       elseif ($message) { " $message" }
@@ -1086,12 +1257,14 @@ function surf {
                       elseif ($mode -eq 'blacklist' -and $blScope) { " Up/Dn   -> browse   <-/Esc back   Enter cd   $($keymap.blacklist.ToUpper()) un-list   $($keymap.tab.ToUpper()) tab   $($keymap.quit.ToUpper()) quit" }
                       elseif ($mode -eq 'blacklist') { " Up/Dn   -> browse   Enter cd   $($keymap.blacklist.ToUpper()) un-list   $($keymap.tab.ToUpper()) tab   Esc/$($keymap.quit.ToUpper()) quit" }
                       elseif ($mode -eq 'results') { " Up/Dn   -> browse   <-/Esc back   Enter cd   $($keymap.blacklist.ToUpper()) blacklist   $($keymap.tab.ToUpper()) tab   $($keymap.quit.ToUpper()) quit" }
+                      elseif ($mode -eq 'worktrees') { " Up/Dn   Enter browse   N new local   R remote/PR   D remove   Esc/$($keymap.worktrees.ToUpper()) back   $($keymap.quit.ToUpper()) quit" }
+                      elseif ($mode -eq 'wt-pick') { ' Up/Dn   Enter checkout into new worktree   Esc back' }
                       else { " Up/Dn   -> in   <- up   Enter cd   Space mark   / jump   $($keymap.search.ToUpper()) search   $($keymap.favourite.ToUpper()) fav   $($keymap.blacklist.ToUpper()) blacklist   $($keymap.tab.ToUpper()) tab   ? help   $($keymap.quit.ToUpper()) quit" }
             if ($marks.Count -gt 0 -and -not $confirmDelete -and $mode -ne 'search-input') {
                 $footer += "   [$($marks.Count) marked]"
             }
             if ($footer.Length -gt $w - 1) { $footer = $footer.Substring(0, $w - 1) }
-            $footerColor = if ($confirmDelete -or $confirmQuit) { 'Yellow' } else { 'DarkGray' }
+            $footerColor = if ($confirmDelete -or $confirmQuit -or $confirmWt) { 'Yellow' } else { 'DarkGray' }
             Write-Host ($footer.PadRight($w - 1)) -ForegroundColor $footerColor -NoNewline
 
             # ---- input --------------------------------------------------
@@ -1212,6 +1385,66 @@ function surf {
                 continue
             }
 
+            if ($confirmWt) {
+                if ($k.Key -eq 'Y') {
+                    $wtTarget = $confirmWt.Wt
+                    $doForce = ($confirmWt.Stage -eq 'force')
+                    $isDirty = $doForce
+                    if (-not $doForce) {
+                        $st = Invoke-SurfGit -Dir $wtTarget.Path -GitArgs @('status', '--porcelain')
+                        $isDirty = [bool]($st.Ok -and $st.Output.Trim())
+                        if ($isDirty) {
+                            # escalate to the explicit unsaved-changes confirm
+                            $confirmWt.Stage = 'force'
+                            continue
+                        }
+                    }
+                    $confirmWt = $null
+                    $plan = Resolve-SurfWorktreeRemovePlan -Worktree $wtTarget -IsDirty $isDirty -Force:$doForce
+                    if (-not $plan.Ok) { $message = $plan.Error; continue }
+                    $mainRoot = $wtState.MainRoot
+                    # removing the worktree we're standing in: land in the main
+                    # worktree first, both surf's view and the process cwd (a dir
+                    # that is someone's cwd cannot be deleted on Windows)
+                    $wtTrim = $wtTarget.Path.TrimEnd('\')
+                    $procCwd = (Get-Location).Path.TrimEnd('\')
+                    if ($procCwd.Equals($wtTrim, [System.StringComparison]::OrdinalIgnoreCase) -or
+                        $procCwd.StartsWith("$wtTrim\", [System.StringComparison]::OrdinalIgnoreCase)) {
+                        Set-Location -LiteralPath $mainRoot
+                    }
+                    $pathTrim = $path.TrimEnd('\')
+                    if ($pathTrim.Equals($wtTrim, [System.StringComparison]::OrdinalIgnoreCase) -or
+                        $pathTrim.StartsWith("$wtTrim\", [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $path = $mainRoot
+                    }
+                    [Console]::SetCursorPosition(0, $rows + 1)
+                    Write-Host (' Removing worktree...'.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
+                    $failed = $null
+                    foreach ($step in $plan.Steps) {
+                        $r = Invoke-SurfGit -Dir $mainRoot -GitArgs $step
+                        if (-not $r.Ok) {
+                            $failed = @(($r.Output -split "`r?`n") | Where-Object { $_.Trim() })[0]
+                            break
+                        }
+                    }
+                    $wtState = Get-SurfWorktreeState -Dir $mainRoot -Prune
+                    if ($mode -eq 'worktrees' -and $wtState) {
+                        $entries = Get-SurfWorktreeMenuEntries $wtState
+                        $cursor = [Math]::Min($cursor, [Math]::Max(0, $entries.Count - 1))
+                    }
+                    if ($failed) { $message = "Remove failed: $failed" }
+                    else {
+                        $wtLeaf = [System.IO.Path]::GetFileName($wtTarget.Path)
+                        if ($wtTarget.Branch) { $message = "Removed worktree '$wtLeaf' and branch '$($wtTarget.Branch)'" }
+                        else { $message = "Removed worktree '$wtLeaf'" }
+                    }
+                } else {
+                    $confirmWt = $null
+                    $message = 'Removal cancelled'
+                }
+                continue
+            }
+
             if ($mode -eq 'search-input') {
                 switch ($k.Key) {
                     'Escape' {
@@ -1264,11 +1497,161 @@ function surf {
                 continue
             }
 
+            if ($mode -eq 'wt-input') {
+                switch ($k.Key) {
+                    'Escape' {
+                        # one prompt back per press
+                        if ($wtFlow.Stage -eq 'path' -and $wtFlow.Kind -eq 'local') {
+                            $wtFlow.Stage = 'base'; $wtFlow.Input = $wtFlow.BaseTyped
+                        } elseif ($wtFlow.Stage -eq 'path') {
+                            $entries = $wtFlow.Picker
+                            $mode = 'wt-pick'; $cursor = 0; $scroll = 0
+                        } elseif ($wtFlow.Stage -eq 'base') {
+                            $wtFlow.Stage = 'branch'; $wtFlow.Input = $wtFlow.Branch
+                        } else {
+                            $wtFlow = $null
+                            $mode = 'worktrees'
+                        }
+                    }
+                    'Backspace' {
+                        if ($wtFlow.Input.Length -gt 0) { $wtFlow.Input = $wtFlow.Input.Substring(0, $wtFlow.Input.Length - 1) }
+                    }
+                    'Enter' {
+                        if ($wtFlow.Stage -eq 'branch') {
+                            $name = $wtFlow.Input.Trim()
+                            # the planner owns branch-name rules; probe it now so a bad
+                            # name fails here, not three prompts later
+                            $probe = Resolve-SurfWorktreeAddPlan -Kind 'local' -BranchName $name -BaseRef 'HEAD' `
+                                -RepoRoot $wtState.MainRoot -RelativePath 'surf-probe' `
+                                -ExistingBranches (Get-SurfLocalBranches -Dir $path)
+                            if (-not $probe.Ok) { $message = $probe.Error }
+                            else { $wtFlow.Branch = $name; $wtFlow.Stage = 'base'; $wtFlow.Input = '' }
+                        } elseif ($wtFlow.Stage -eq 'base') {
+                            $typed = $wtFlow.Input.Trim()
+                            $wtFlow.BaseTyped = $typed
+                            if ($typed) { $wtFlow.Base = $typed }
+                            else {
+                                [Console]::SetCursorPosition(0, $rows + 1)
+                                Write-Host (' Fetching origin...'.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
+                                $wtFlow.Base = Resolve-SurfDefaultBase -Dir $path
+                            }
+                            if (-not $wtFlow.Base) { $message = 'No default branch found - type a base ref' }
+                            else { $wtFlow.Stage = 'path'; $wtFlow.Input = ($wtFlow.Branch -replace '[/\\]', '-') }
+                        } else {
+                            $existingWt = @()
+                            foreach ($x in @($wtState.Worktrees)) { $existingWt += $x.Path }
+                            $plan = Resolve-SurfWorktreeAddPlan -Kind $wtFlow.Kind -BranchName $wtFlow.Branch `
+                                -BaseRef $wtFlow.Base -RepoRoot $wtState.MainRoot -RelativePath $wtFlow.Input `
+                                -ExistingBranches (Get-SurfLocalBranches -Dir $path) -ExistingWorktreePaths $existingWt
+                            if (-not $plan.Ok) { $message = $plan.Error }
+                            else {
+                                [Console]::SetCursorPosition(0, $rows + 1)
+                                Write-Host (' Creating worktree...'.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
+                                $failed = $null
+                                foreach ($step in $plan.Steps) {
+                                    $r = Invoke-SurfGit -Dir $wtState.MainRoot -GitArgs $step
+                                    if (-not $r.Ok) {
+                                        $failed = @(($r.Output -split "`r?`n") | Where-Object { $_.Trim() })[0]
+                                        break
+                                    }
+                                }
+                                # back to the list, staying where we were (the new
+                                # worktree appears as a row rather than yanking us in)
+                                $wtFlow = $null
+                                $wtState = Get-SurfWorktreeState -Dir $path -Prune
+                                $entries = Get-SurfWorktreeMenuEntries $wtState
+                                $mode = 'worktrees'; $cursor = 0; $scroll = 0
+                                if ($failed) { $message = "Create failed: $failed" }
+                                else { $message = "Created worktree: $($plan.WorktreePath)" }
+                            }
+                        }
+                    }
+                    default {
+                        $ch = $k.KeyChar
+                        if ($ch -and [int]$ch -ge 32) { $wtFlow.Input += $ch }
+                    }
+                }
+                continue
+            }
+
             # help overlay: navigation keys scroll it, anything else closes it
             if ($mode -eq 'help' -and $k.Key -notin @('UpArrow', 'DownArrow', 'PageUp', 'PageDown', 'Home', 'End')) {
                 $mode = $helpPrev.Mode; $entries = $helpPrev.Entries
                 $cursor = $helpPrev.Cursor; $scroll = $helpPrev.Scroll
                 continue
+            }
+
+            # worktree management area: Enter browses in, N/R/D mutate, Esc/W close.
+            # Arrow and paging keys fall through to the shared handlers below.
+            if ($mode -eq 'worktrees') {
+                if ($k.Key -eq 'Enter') {
+                    $e = $entries[$cursor]
+                    if ($e.Kind -eq 'wt') {
+                        try {
+                            $entries = Get-SurfListing $e.FullPath
+                            $path = $e.FullPath
+                            $mode = 'browse'; $cursor = 0; $scroll = 0
+                            $wtPrev = $null; $wtState = $null
+                        } catch { $message = "Cannot open: $($e.Name)" }
+                    }
+                    continue
+                }
+                if ($k.Key -eq 'Escape') { . $CloseWorktreeArea; continue }
+                $chW = if ($k.KeyChar -and [char]::IsLetterOrDigit($k.KeyChar)) { ([string]$k.KeyChar).ToLower() } else { $null }
+                if ($chW) {
+                    if ($chW -eq 'n') {
+                        $wtFlow = @{ Kind = 'local'; Stage = 'branch'; Branch = ''; Base = $null; BaseTyped = ''; Input = ''; Source = ''; Picker = $null }
+                        $mode = 'wt-input'
+                    } elseif ($chW -eq 'r') {
+                        [Console]::SetCursorPosition(0, $rows + 1)
+                        Write-Host (' Loading branches...'.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
+                        $picker = Get-SurfBranchPicker -Dir $path
+                        if (@($picker.Entries).Count -eq 0) {
+                            $message = 'No open PRs or remote branches found'
+                        } else {
+                            $list = New-Object System.Collections.Generic.List[object]
+                            foreach ($p in @($picker.Entries)) {
+                                $list.Add(([pscustomobject]@{ Name = $p.Display; Kind = 'wtpick'; FullPath = ''; Fav = $false; Date = $null; Branch = $p.Branch }))
+                            }
+                            $wtFlow = @{ Kind = 'remote'; Stage = 'pick'; Branch = ''; Base = $null; BaseTyped = ''; Input = ''; Source = $picker.Source; Picker = $list }
+                            $entries = $list
+                            $mode = 'wt-pick'; $cursor = 0; $scroll = 0
+                        }
+                    } elseif ($chW -eq 'd') {
+                        $e = $entries[$cursor]
+                        if ($e.Kind -eq 'wt') {
+                            if ($e.Wt.IsMain) { $message = 'The main worktree cannot be removed' }
+                            else { $confirmWt = @{ Wt = $e.Wt; Stage = 'confirm' } }
+                        }
+                    } elseif ($chW -eq $keymap.worktrees) {
+                        . $CloseWorktreeArea
+                    } elseif ($chW -eq $keymap.quit) {
+                        if (Test-SurfProcsRunning) { $confirmQuit = @{ Action = 'quit' } } else { return }
+                    }
+                    continue
+                }
+            }
+
+            # remote branch / PR picker: Enter selects, Esc backs out
+            if ($mode -eq 'wt-pick') {
+                if ($k.Key -eq 'Enter') {
+                    $sel = $entries[$cursor]
+                    if ($sel.Kind -eq 'wtpick') {
+                        $wtFlow.Branch = $sel.Branch
+                        $wtFlow.Stage = 'path'
+                        $wtFlow.Input = ($sel.Branch -replace '[/\\]', '-')
+                        $entries = Get-SurfWorktreeMenuEntries $wtState
+                        $mode = 'wt-input'; $cursor = 0; $scroll = 0
+                    }
+                    continue
+                }
+                if ($k.Key -eq 'Escape' -or $k.Key -eq 'LeftArrow') {
+                    $wtFlow = $null
+                    $entries = Get-SurfWorktreeMenuEntries $wtState
+                    $mode = 'worktrees'; $cursor = 0; $scroll = 0
+                    continue
+                }
+                if ($k.KeyChar -and [int]$k.KeyChar -ge 32) { continue }
             }
 
             # a which-key menu is open: the next letter walks the chain, anything else cancels
@@ -1446,6 +1829,23 @@ function surf {
                                 } catch { $message = "Could not open terminal: $($_.Exception.Message)" }
                             }
                         }
+
+                        'worktrees' {
+                            if ($mode -eq 'browse' -or $mode -eq 'results') {
+                                $ws = Get-SurfWorktreeState -Dir $path -Prune
+                                if (-not $ws) { $message = 'Not inside a git repository' }
+                                else {
+                                    $wtState = $ws
+                                    $wtPrev = @{ Mode = $mode; Entries = $entries; Cursor = $cursor; Scroll = $scroll }
+                                    $entries = Get-SurfWorktreeMenuEntries $wtState
+                                    $mode = 'worktrees'; $cursor = 0; $scroll = 0
+                                    # pre-select the worktree we're standing in
+                                    for ($j = 0; $j -lt $entries.Count; $j++) {
+                                        if ($entries[$j].Wt.IsCurrent) { $cursor = $j; break }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 continue
@@ -1468,12 +1868,13 @@ function surf {
                         $cursor = 0; $scroll = 0
                     } elseif ($e.Kind -eq 'bl' -and -not (Test-Path -LiteralPath $e.FullPath -PathType Container)) {
                         $message = 'Not a folder - un-list with B'
-                    } elseif ($e.Kind -eq 'dir' -or $e.Kind -eq 'drive' -or $e.Kind -eq 'bl') {
+                    } elseif ($e.Kind -eq 'dir' -or $e.Kind -eq 'drive' -or $e.Kind -eq 'bl' -or $e.Kind -eq 'wt') {
                         try {
                             $entries = Get-SurfListing $e.FullPath
                             $path = $e.FullPath
                             $mode = 'browse'
                             $cursor = 0; $scroll = 0
+                            $wtPrev = $null; $wtState = $null
                         } catch {
                             $message = "Cannot open: $($e.Name)"
                         }
