@@ -325,6 +325,7 @@ function ConvertFrom-SurfWorktreeList {
             Path      = $wtPath
             Branch    = $branch
             IsMain    = ($result.Count -eq 0)
+            IsBare    = ($block -match '(?m)^bare$')
             IsCurrent = $false
         })
     }
@@ -343,6 +344,23 @@ function ConvertFrom-SurfWorktreeList {
         if ($best) { $best.IsCurrent = $true }
     }
     return $result
+}
+
+# Derives the path anchor and the displayable rows from parsed worktrees.
+# Normal repo: the main worktree is the anchor and every entry is a row.
+# Bare layout (.bare / repo.git with worktrees alongside): the anchor is the
+# bare repo's parent - where the worktrees actually live - and the bare entry
+# itself is never a row (it is not a checkout you can browse or remove).
+function Resolve-SurfWorktreeRoot {
+    param($Worktrees)
+    $wts = @($Worktrees)
+    if ($wts.Count -eq 0) { return $null }
+    if ($wts[0].IsBare) {
+        $parent = [System.IO.Path]::GetDirectoryName($wts[0].Path.TrimEnd('\'))
+        if (-not $parent) { $parent = $wts[0].Path }
+        return @{ MainRoot = $parent; Rows = @($wts | Where-Object { -not $_.IsBare }) }
+    }
+    return @{ MainRoot = $wts[0].Path; Rows = @($wts | Where-Object { -not $_.IsBare }) }
 }
 
 # Both branch pickers feed the same UI: entries of {Display, Branch}.
@@ -483,7 +501,8 @@ function Get-SurfWorktreeState {
     if (-not $r.Ok) { return $null }
     $wts = @(ConvertFrom-SurfWorktreeList -Text $r.Output -CurrentDir $Dir)
     if ($wts.Count -eq 0) { return $null }
-    return @{ MainRoot = $wts[0].Path; Worktrees = $wts }
+    $root = Resolve-SurfWorktreeRoot -Worktrees $wts
+    return @{ MainRoot = $root.MainRoot; Worktrees = $wts; Rows = $root.Rows }
 }
 
 function Get-SurfLocalBranches {
@@ -602,8 +621,8 @@ function surf {
         # worktrees exist and which one we're in. Navigation only - add/remove
         # live in the management area (the worktrees key).
         $ws = Get-SurfWorktreeState -Dir $dir
-        if ($ws -and @($ws.Worktrees).Count -gt 1) {
-            $list.Add((New-SurfEntry ('worktrees ({0})' -f @($ws.Worktrees).Count) 'none' ''))
+        if ($ws -and @($ws.Rows | Where-Object { -not $_.IsMain }).Count -ge 1) {
+            $list.Add((New-SurfEntry ('worktrees ({0})' -f @($ws.Rows).Count) 'none' ''))
             foreach ($row in (Get-SurfWorktreeRowEntries $ws)) { $list.Add($row) }
         }
         $blDirs = 0; $blFiles = 0
@@ -634,7 +653,7 @@ function surf {
     # {hovered} meaningful on these rows.
     function Get-SurfWorktreeRowEntries($state) {
         $rows = @()
-        foreach ($wt in @($state.Worktrees)) {
+        foreach ($wt in @($state.Rows)) {
             $leaf = [System.IO.Path]::GetFileName($wt.Path)
             if (-not $leaf) { $leaf = $wt.Path }
             $branch = if ($wt.Branch) { $wt.Branch } else { 'detached' }
@@ -649,6 +668,10 @@ function surf {
     function Get-SurfWorktreeMenuEntries($state) {
         $list = New-Object System.Collections.Generic.List[object]
         foreach ($row in (Get-SurfWorktreeRowEntries $state)) { $list.Add($row) }
+        if ($list.Count -eq 0) {
+            # a bare repo with no worktrees yet: the area still opens so N/R work
+            $list.Add((New-SurfEntry '(no worktrees yet - N new local, R remote)' 'none' ''))
+        }
         return ,$list
     }
 

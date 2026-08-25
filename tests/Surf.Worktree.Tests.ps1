@@ -76,6 +76,52 @@ Describe 'ConvertFrom-SurfWorktreeList' {
             @(ConvertFrom-SurfWorktreeList -Text '' -CurrentDir 'C:\x').Count | Should -Be 0
         }
     }
+
+    It 'flags bare entries so a bare-layout repo can be anchored correctly' {
+        InModuleScope Surf {
+            $porcelain = @(
+                'worktree C:/repos/myproj/.bare'
+                'bare'
+                ''
+                'worktree C:/repos/myproj/main'
+                'HEAD 0123456789abcdef0123456789abcdef01234567'
+                'branch refs/heads/main'
+                ''
+            ) -join "`n"
+            $wts = @(ConvertFrom-SurfWorktreeList -Text $porcelain -CurrentDir 'C:\repos\myproj')
+            $wts[0].IsBare | Should -BeTrue
+            $wts[1].IsBare | Should -BeFalse
+        }
+    }
+}
+
+Describe 'Resolve-SurfWorktreeRoot' {
+    It 'anchors a normal repo at the main worktree, listing every entry as a row' {
+        InModuleScope Surf {
+            $wts = @(
+                [pscustomobject]@{ Path = 'C:\repos\surf'; Branch = 'main'; IsMain = $true; IsBare = $false; IsCurrent = $true }
+                [pscustomobject]@{ Path = 'C:\repos\surf\.claude\worktrees\fix'; Branch = 'fix'; IsMain = $false; IsBare = $false; IsCurrent = $false }
+            )
+            $root = Resolve-SurfWorktreeRoot -Worktrees $wts
+            $root.MainRoot | Should -Be 'C:\repos\surf'
+            @($root.Rows).Count | Should -Be 2
+        }
+    }
+
+    It 'anchors a bare layout at the bare repo''s parent and hides the bare entry from the rows' {
+        InModuleScope Surf {
+            # the .bare convention: worktrees live alongside .bare at the project root
+            $wts = @(
+                [pscustomobject]@{ Path = 'C:\repos\myproj\.bare'; Branch = $null; IsMain = $true; IsBare = $true; IsCurrent = $false }
+                [pscustomobject]@{ Path = 'C:\repos\myproj\main'; Branch = 'main'; IsMain = $false; IsBare = $false; IsCurrent = $true }
+                [pscustomobject]@{ Path = 'C:\repos\myproj\feature'; Branch = 'feature'; IsMain = $false; IsBare = $false; IsCurrent = $false }
+            )
+            $root = Resolve-SurfWorktreeRoot -Worktrees $wts
+            $root.MainRoot | Should -Be 'C:\repos\myproj'
+            @($root.Rows).Count | Should -Be 2
+            @($root.Rows | Where-Object { $_.IsBare }).Count | Should -Be 0
+        }
+    }
 }
 
 Describe 'ConvertFrom-SurfPrJson' {
