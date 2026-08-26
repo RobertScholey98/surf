@@ -182,14 +182,17 @@ Describe 'ConvertFrom-SurfRemoteHeads' {
 }
 
 Describe 'Resolve-SurfWorktreeAddPlan' {
-    It 'plans a local add: new branch from the base ref, worktree at the repo-root-relative path' {
+    It 'plans a local add: new branch from the base ref with no upstream, worktree at the repo-root-relative path' {
         InModuleScope Surf {
             $plan = Resolve-SurfWorktreeAddPlan -Kind 'local' -BranchName 'fix-login' -BaseRef 'origin/main' `
                 -RepoRoot 'C:\repos\surf' -RelativePath 'fix-login' -ExistingBranches @('main', 'other')
             $plan.Ok | Should -BeTrue
             $plan.WorktreePath | Should -Be 'C:\repos\surf\fix-login'
             $plan.Steps.Count | Should -Be 1
-            @($plan.Steps[0]) | Should -Be @('worktree', 'add', '-b', 'fix-login', 'C:\repos\surf\fix-login', 'origin/main')
+            # --no-track matters: without it, branching from a remote-tracking ref
+            # auto-sets upstream to the base (origin/main), and a later `git push`
+            # refuses because the upstream name does not match the branch name
+            @($plan.Steps[0]) | Should -Be @('worktree', 'add', '--no-track', '-b', 'fix-login', 'C:\repos\surf\fix-login', 'origin/main')
         }
     }
 

@@ -434,7 +434,10 @@ function Resolve-SurfWorktreeAddPlan {
     }
     $steps = @()
     if ($Kind -eq 'local') {
-        $steps += ,@('worktree', 'add', '-b', $BranchName, $wtPath, $BaseRef)
+        # --no-track: branching from a remote-tracking base would otherwise
+        # auto-set upstream to the base itself, and `git push` then refuses
+        # because the upstream name does not match the branch name
+        $steps += ,@('worktree', 'add', '--no-track', '-b', $BranchName, $wtPath, $BaseRef)
     } else {
         $steps += ,@('fetch', $Remote, $BranchName)
         $steps += ,@('worktree', 'add', '--track', '-b', $BranchName, $wtPath, "$Remote/$BranchName")
