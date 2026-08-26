@@ -465,14 +465,62 @@ function Resolve-SurfWorktreeRemovePlan {
     return @{ Ok = $true; Error = $null; RequiresForce = $false; Steps = $steps }
 }
 
-# The one choke point that shells out to git. -C keeps surf's own location out
-# of it; stderr merges into Output so callers get git's words on failure.
+# Builds one Windows command line from argument values, quoting only what
+# needs it. Trailing backslashes inside quotes double so they cannot escape
+# the closing quote; embedded quotes get the standard backslash treatment.
+function ConvertTo-SurfArgString {
+    param([string[]]$Items)
+    $parts = @()
+    foreach ($a in @($Items)) {
+        if ($null -eq $a) { $a = '' }
+        if ($a -eq '' -or $a -match '[\s"]') {
+            $q = $a -replace '(\\*)"', '$1$1\"'
+            $q = $q -replace '(\\+)$', '$1$1'
+            $parts += ('"' + $q + '"')
+        } else {
+            $parts += $a
+        }
+    }
+    return ($parts -join ' ')
+}
+
+# Starts git detached from surf's console input: stdin is closed and terminal
+# prompts are disabled, so git can never sit waiting for input the TUI will
+# not deliver - a would-be hang becomes a visible error instead. Returns a
+# handle for Complete-SurfGit; the caller may poll Handle.Process.HasExited
+# to stay responsive while git works.
+function Start-SurfGit {
+    param([string]$Dir, [string[]]$GitArgs)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'git'
+    $psi.Arguments = ConvertTo-SurfArgString (@('-C', $Dir) + @($GitArgs))
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.EnvironmentVariables['GIT_TERMINAL_PROMPT'] = '0'
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $p.StandardInput.Close()
+    # async drains keep a chatty git from ever filling a pipe and deadlocking
+    return @{ Process = $p; Out = $p.StandardOutput.ReadToEndAsync(); Err = $p.StandardError.ReadToEndAsync() }
+}
+
+function Complete-SurfGit {
+    param($Handle)
+    $Handle.Process.WaitForExit()
+    $text = (($Handle.Out.Result, $Handle.Err.Result) -join "`n").Trim()
+    $code = $Handle.Process.ExitCode
+    $Handle.Process.Dispose()
+    return @{ Ok = ($code -eq 0); Output = $text; ExitCode = $code }
+}
+
+# The one choke point that shells out to git and waits. -C keeps surf's own
+# location out of it; stderr merges into Output so callers get git's words.
 function Invoke-SurfGit {
     param([string]$Dir, [string[]]$GitArgs)
     try {
-        $out = & git -C $Dir @GitArgs 2>&1
-        $lines = @($out | ForEach-Object { "$_" })
-        return @{ Ok = ($LASTEXITCODE -eq 0); Output = ($lines -join "`n"); ExitCode = $LASTEXITCODE }
+        return (Complete-SurfGit (Start-SurfGit -Dir $Dir -GitArgs $GitArgs))
     } catch {
         return @{ Ok = $false; Output = $_.Exception.Message; ExitCode = -1 }
     }
@@ -515,10 +563,10 @@ function Get-SurfLocalBranches {
 # "Latest master": fetch origin, then origin/HEAD -> origin/main -> origin/master;
 # with no remote, fall back to the local default branch. $null when nothing fits.
 function Resolve-SurfDefaultBase {
-    param([string]$Dir)
+    param([string]$Dir, [switch]$SkipFetch)
     $remotes = Invoke-SurfGit -Dir $Dir -GitArgs @('remote')
     if ($remotes.Ok -and $remotes.Output.Trim()) {
-        $null = Invoke-SurfGit -Dir $Dir -GitArgs @('fetch', 'origin')
+        if (-not $SkipFetch) { $null = Invoke-SurfGit -Dir $Dir -GitArgs @('fetch', 'origin') }
         $head = Invoke-SurfGit -Dir $Dir -GitArgs @('rev-parse', '--abbrev-ref', 'origin/HEAD')
         if ($head.Ok -and $head.Output.Trim() -match '^origin/.') { return $head.Output.Trim() }
         foreach ($cand in @('origin/main', 'origin/master')) {
@@ -942,6 +990,42 @@ function surf {
             [Console]::TreatControlCAsInput = $prevCtrlC
             [Console]::CursorVisible = $false
         }
+    }
+
+    # Dot-invoked (. $RunGitSteps): runs git steps with a live spinner and
+    # elapsed seconds in the footer, so long operations (deleting a
+    # node_modules-sized worktree, fetching a cold remote) visibly make
+    # progress instead of looking frozen. Expects $gitDir, $gitSteps and
+    # $gitLabel; sets $gitFailed to git's first fatal/error line, or $null.
+    $RunGitSteps = {
+        $gitFailed = $null
+        $gitSw = [System.Diagnostics.Stopwatch]::StartNew()
+        $gitSpinner = '|', '/', '-', '\'
+        $gitSi = 0
+        foreach ($gitStep in $gitSteps) {
+            $gitHandle = $null
+            try { $gitHandle = Start-SurfGit -Dir $gitDir -GitArgs $gitStep }
+            catch { $gitFailed = $_.Exception.Message; break }
+            while (-not $gitHandle.Process.HasExited) {
+                $gitLine = ' {0}  {1}  {2}s   (git {3})' -f $gitLabel, $gitSpinner[$gitSi % 4], [int]$gitSw.Elapsed.TotalSeconds, (@($gitStep) -join ' ')
+                if ($gitLine.Length -gt $w - 1) { $gitLine = $gitLine.Substring(0, $w - 1) }
+                [Console]::SetCursorPosition(0, $rows + 1)
+                Write-Host ($gitLine.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
+                $gitSi++
+                Start-Sleep -Milliseconds 120
+            }
+            $gitResult = Complete-SurfGit $gitHandle
+            if (-not $gitResult.Ok) {
+                $gitLines = @(($gitResult.Output -split "`r?`n") | Where-Object { $_.Trim() })
+                $gitErrs = @($gitLines | Where-Object { $_ -match '^\s*(fatal|error):' })
+                if ($gitErrs.Count -gt 0) { $gitFailed = $gitErrs[0].Trim() }
+                elseif ($gitLines.Count -gt 0) { $gitFailed = $gitLines[0].Trim() }
+                else { $gitFailed = "git exited with code $($gitResult.ExitCode)" }
+                break
+            }
+        }
+        # keys mashed while git worked stay out of the browse loop
+        while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
     }
 
     # Dot-invoked: closes the worktree management area back to the prior view.
@@ -1440,16 +1524,10 @@ function surf {
                         $pathTrim.StartsWith("$wtTrim\", [System.StringComparison]::OrdinalIgnoreCase)) {
                         $path = $mainRoot
                     }
-                    [Console]::SetCursorPosition(0, $rows + 1)
-                    Write-Host (' Removing worktree...'.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
-                    $failed = $null
-                    foreach ($step in $plan.Steps) {
-                        $r = Invoke-SurfGit -Dir $mainRoot -GitArgs $step
-                        if (-not $r.Ok) {
-                            $failed = @(($r.Output -split "`r?`n") | Where-Object { $_.Trim() })[0]
-                            break
-                        }
-                    }
+                    $gitDir = $mainRoot; $gitSteps = $plan.Steps
+                    $gitLabel = "Removing worktree '$([System.IO.Path]::GetFileName($wtTarget.Path))'"
+                    . $RunGitSteps
+                    $failed = $gitFailed
                     $wtState = Get-SurfWorktreeState -Dir $mainRoot -Prune
                     if ($mode -eq 'worktrees' -and $wtState) {
                         $entries = Get-SurfWorktreeMenuEntries $wtState
@@ -1554,9 +1632,14 @@ function surf {
                             $wtFlow.BaseTyped = $typed
                             if ($typed) { $wtFlow.Base = $typed }
                             else {
-                                [Console]::SetCursorPosition(0, $rows + 1)
-                                Write-Host (' Fetching origin...'.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
-                                $wtFlow.Base = Resolve-SurfDefaultBase -Dir $path
+                                $remotes = Invoke-SurfGit -Dir $path -GitArgs @('remote')
+                                if ($remotes.Ok -and $remotes.Output.Trim()) {
+                                    $gitDir = $path; $gitSteps = @(,@('fetch', 'origin')); $gitLabel = 'Fetching origin'
+                                    . $RunGitSteps
+                                    # offline or auth-blocked: resolve from last known refs
+                                    if ($gitFailed) { $message = "Fetch failed ($gitFailed) - using last known refs" }
+                                }
+                                $wtFlow.Base = Resolve-SurfDefaultBase -Dir $path -SkipFetch
                             }
                             if (-not $wtFlow.Base) { $message = 'No default branch found - type a base ref' }
                             else { $wtFlow.Stage = 'path'; $wtFlow.Input = ($wtFlow.Branch -replace '[/\\]', '-') }
@@ -1568,16 +1651,10 @@ function surf {
                                 -ExistingBranches (Get-SurfLocalBranches -Dir $path) -ExistingWorktreePaths $existingWt
                             if (-not $plan.Ok) { $message = $plan.Error }
                             else {
-                                [Console]::SetCursorPosition(0, $rows + 1)
-                                Write-Host (' Creating worktree...'.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
-                                $failed = $null
-                                foreach ($step in $plan.Steps) {
-                                    $r = Invoke-SurfGit -Dir $wtState.MainRoot -GitArgs $step
-                                    if (-not $r.Ok) {
-                                        $failed = @(($r.Output -split "`r?`n") | Where-Object { $_.Trim() })[0]
-                                        break
-                                    }
-                                }
+                                $gitDir = $wtState.MainRoot; $gitSteps = $plan.Steps
+                                $gitLabel = "Creating worktree '$($wtFlow.Branch)'"
+                                . $RunGitSteps
+                                $failed = $gitFailed
                                 # back to the list, staying where we were (the new
                                 # worktree appears as a row rather than yanking us in)
                                 $wtFlow = $null

@@ -95,6 +95,19 @@ Describe 'ConvertFrom-SurfWorktreeList' {
     }
 }
 
+Describe 'ConvertTo-SurfArgString' {
+    It 'quotes only what needs quoting and survives trailing backslashes and embedded quotes' {
+        InModuleScope Surf {
+            ConvertTo-SurfArgString @('worktree', 'remove', 'C:\plain\path') | Should -Be 'worktree remove C:\plain\path'
+            ConvertTo-SurfArgString @('-C', 'C:\has space\repo') | Should -Be '-C "C:\has space\repo"'
+            # a trailing backslash inside quotes must not escape the closing quote
+            ConvertTo-SurfArgString @('C:\has space\') | Should -Be '"C:\has space\\"'
+            ConvertTo-SurfArgString @('say "hi"') | Should -Be '"say \"hi\""'
+            ConvertTo-SurfArgString @('') | Should -Be '""'
+        }
+    }
+}
+
 Describe 'Resolve-SurfWorktreeRoot' {
     It 'anchors a normal repo at the main worktree, listing every entry as a row' {
         InModuleScope Surf {
