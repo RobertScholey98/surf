@@ -155,7 +155,7 @@ namespace Surf
         /// <summary>Exited AND both reader threads have delivered the final output.</summary>
         public bool HasDrained
         {
-            get { return HasExited && Thread.VolatileRead(ref _readersDone) >= 2; }
+            get { return HasExited && Volatile.Read(ref _readersDone) >= 2; }
         }
 
         public int ExitCode

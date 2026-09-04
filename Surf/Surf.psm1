@@ -72,12 +72,14 @@
 # .NET Framework, so re-imports reuse the loaded type; changing SurfJob.cs therefore
 # requires a fresh PowerShell session.
 if (-not ('Surf.SurfJob' -as [type])) {
-    $surfJobRefs = if ($PSVersionTable.PSEdition -eq 'Core') {
-        @('System.Diagnostics.Process', 'System.Threading.Thread', 'System.ComponentModel.Primitives', 'netstandard')
+    $surfJobPath = Join-Path $PSScriptRoot 'SurfJob.cs'
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        # Let Add-Type supply the reference set for the runtime it is hosted by.
+        # A hand-maintained list breaks as framework types move between assemblies.
+        Add-Type -Path $surfJobPath
     } else {
-        @('System.dll')
+        Add-Type -Path $surfJobPath -ReferencedAssemblies @('System.dll')
     }
-    Add-Type -Path (Join-Path $PSScriptRoot 'SurfJob.cs') -ReferencedAssemblies $surfJobRefs
 }
 
 $script:SurfDataDir        = Join-Path $env:APPDATA 'surf'

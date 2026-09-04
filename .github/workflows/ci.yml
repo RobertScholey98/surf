@@ -22,8 +22,9 @@ jobs:
       - name: Import on PowerShell 7
         shell: pwsh
         run: |
-          Import-Module ./Surf/Surf.psd1 -Force
+          Import-Module ./Surf/Surf.psd1 -Force -ErrorAction Stop
           if (-not (Get-Command surf)) { exit 1 }
+          if (-not ('Surf.SurfJob' -as [type])) { exit 1 }
           'imported OK on PS ' + $PSVersionTable.PSVersion
 
       - name: Pester tests
@@ -35,6 +36,7 @@ jobs:
       - name: Import on Windows PowerShell 5.1
         shell: powershell
         run: |
-          Import-Module ./Surf/Surf.psd1 -Force
+          Import-Module ./Surf/Surf.psd1 -Force -ErrorAction Stop
           if (-not (Get-Command surf)) { exit 1 }
+          if (-not ('Surf.SurfJob' -as [type])) { exit 1 }
           'imported OK on PS ' + $PSVersionTable.PSVersion
