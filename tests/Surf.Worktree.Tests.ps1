@@ -117,6 +117,14 @@ Describe 'Format-SurfWorktreeBadge' {
             Format-SurfWorktreeBadge -Changed 3 -Unpushed 2 | Should -Be '3 changed, 2 unpushed'
         }
     }
+
+    It 'names commits the worktree is behind the default branch' {
+        InModuleScope Surf {
+            Format-SurfWorktreeBadge -Changed 0 -Unpushed 0 -Behind 5 | Should -Be '5 behind'
+            Format-SurfWorktreeBadge -Changed 3 -Unpushed 2 -Behind 5 | Should -Be '3 changed, 2 unpushed, 5 behind'
+            Format-SurfWorktreeBadge -Changed 1 -Unpushed 0 -Behind 0 | Should -Be '1 changed'
+        }
+    }
 }
 
 Describe 'Resolve-SurfWorktreeRoot' {

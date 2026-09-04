@@ -556,25 +556,31 @@ function Get-SurfWorktreeState {
     return @{ MainRoot = $root.MainRoot; Worktrees = $wts; Rows = $root.Rows }
 }
 
-# Uncommitted file count and unpushed commit count for one worktree. Unpushed
-# means commits reachable from HEAD but from no remote ref, which also reads
-# correctly on a branch that has no upstream yet.
+# Uncommitted file count, unpushed commit count, and (when BaseRef is given)
+# how many commits the worktree is behind it. Unpushed means commits reachable
+# from HEAD but from no remote ref, which also reads correctly on a branch
+# that has no upstream yet.
 function Get-SurfWorktreeStatus {
-    param([string]$WtPath)
-    $changed = 0; $unpushed = 0
+    param([string]$WtPath, [string]$BaseRef)
+    $changed = 0; $unpushed = 0; $behind = 0
     $st = Invoke-SurfGit -Dir $WtPath -GitArgs @('status', '--porcelain')
     if ($st.Ok) { $changed = @(($st.Output -split "`r?`n") | Where-Object { $_.Trim() }).Count }
     $rl = Invoke-SurfGit -Dir $WtPath -GitArgs @('rev-list', '--count', 'HEAD', '--not', '--remotes')
     if ($rl.Ok -and $rl.Output.Trim() -match '^\d+$') { $unpushed = [int]$rl.Output.Trim() }
-    return @{ Changed = $changed; Unpushed = $unpushed }
+    if ($BaseRef) {
+        $bh = Invoke-SurfGit -Dir $WtPath -GitArgs @('rev-list', '--count', "HEAD..$BaseRef")
+        if ($bh.Ok -and $bh.Output.Trim() -match '^\d+$') { $behind = [int]$bh.Output.Trim() }
+    }
+    return @{ Changed = $changed; Unpushed = $unpushed; Behind = $behind }
 }
 
 # Right-hand badge text for a worktree row; empty when there is nothing to say.
 function Format-SurfWorktreeBadge {
-    param([int]$Changed, [int]$Unpushed)
+    param([int]$Changed, [int]$Unpushed, [int]$Behind = 0)
     $parts = @()
     if ($Changed -gt 0) { $parts += "$Changed changed" }
     if ($Unpushed -gt 0) { $parts += "$Unpushed unpushed" }
+    if ($Behind -gt 0) { $parts += "$Behind behind" }
     return ($parts -join ', ')
 }
 
@@ -743,9 +749,12 @@ function surf {
     # never in the browse hot path.
     function Get-SurfWorktreeMenuEntries($state) {
         $list = New-Object System.Collections.Generic.List[object]
+        # behind is measured against the default branch as last fetched -
+        # resolving it must not hit the network on every area open
+        $badgeBase = Resolve-SurfDefaultBase -Dir $state.MainRoot -SkipFetch
         foreach ($row in (Get-SurfWorktreeRowEntries $state)) {
-            $s = Get-SurfWorktreeStatus -WtPath $row.FullPath
-            $row.Badge = Format-SurfWorktreeBadge -Changed $s.Changed -Unpushed $s.Unpushed
+            $s = Get-SurfWorktreeStatus -WtPath $row.FullPath -BaseRef $badgeBase
+            $row.Badge = Format-SurfWorktreeBadge -Changed $s.Changed -Unpushed $s.Unpushed -Behind $s.Behind
             $list.Add($row)
         }
         if ($list.Count -eq 0) {
