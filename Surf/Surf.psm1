@@ -556,6 +556,28 @@ function Get-SurfWorktreeState {
     return @{ MainRoot = $root.MainRoot; Worktrees = $wts; Rows = $root.Rows }
 }
 
+# Uncommitted file count and unpushed commit count for one worktree. Unpushed
+# means commits reachable from HEAD but from no remote ref, which also reads
+# correctly on a branch that has no upstream yet.
+function Get-SurfWorktreeStatus {
+    param([string]$WtPath)
+    $changed = 0; $unpushed = 0
+    $st = Invoke-SurfGit -Dir $WtPath -GitArgs @('status', '--porcelain')
+    if ($st.Ok) { $changed = @(($st.Output -split "`r?`n") | Where-Object { $_.Trim() }).Count }
+    $rl = Invoke-SurfGit -Dir $WtPath -GitArgs @('rev-list', '--count', 'HEAD', '--not', '--remotes')
+    if ($rl.Ok -and $rl.Output.Trim() -match '^\d+$') { $unpushed = [int]$rl.Output.Trim() }
+    return @{ Changed = $changed; Unpushed = $unpushed }
+}
+
+# Right-hand badge text for a worktree row; empty when there is nothing to say.
+function Format-SurfWorktreeBadge {
+    param([int]$Changed, [int]$Unpushed)
+    $parts = @()
+    if ($Changed -gt 0) { $parts += "$Changed changed" }
+    if ($Unpushed -gt 0) { $parts += "$Unpushed unpushed" }
+    return ($parts -join ', ')
+}
+
 function Get-SurfLocalBranches {
     param([string]$Dir)
     $r = Invoke-SurfGit -Dir $Dir -GitArgs @('for-each-ref', 'refs/heads', '--format=%(refname:short)')
@@ -711,14 +733,21 @@ function surf {
             $name = "$leaf [$branch]"
             if ($wt.IsMain) { $name += '  (main)' }
             if ($wt.IsCurrent) { $name += '  (here)' }
-            $rows += ,([pscustomobject]@{ Name = $name; Kind = 'wt'; FullPath = $wt.Path; Fav = $false; Date = $null; Wt = $wt })
+            $rows += ,([pscustomobject]@{ Name = $name; Kind = 'wt'; FullPath = $wt.Path; Fav = $false; Date = $null; Wt = $wt; Badge = '' })
         }
         return ,$rows
     }
 
+    # Menu rows carry status badges (uncommitted files, unpushed commits) -
+    # two git calls per worktree, paid only when the management area builds,
+    # never in the browse hot path.
     function Get-SurfWorktreeMenuEntries($state) {
         $list = New-Object System.Collections.Generic.List[object]
-        foreach ($row in (Get-SurfWorktreeRowEntries $state)) { $list.Add($row) }
+        foreach ($row in (Get-SurfWorktreeRowEntries $state)) {
+            $s = Get-SurfWorktreeStatus -WtPath $row.FullPath
+            $row.Badge = Format-SurfWorktreeBadge -Changed $s.Changed -Unpushed $s.Unpushed
+            $list.Add($row)
+        }
         if ($list.Count -eq 0) {
             # a bare repo with no worktrees yet: the area still opens so N/R work
             $list.Add((New-SurfEntry '(no worktrees yet - N new local, R remote)' 'none' ''))
@@ -1261,8 +1290,11 @@ function surf {
                             elseif ($e.Kind -eq 'mark') { " + $label" }
                             elseif ($e.Fav) { " * $label" }
                             else { "   $label" }
-                    # files carry their modified date, right-aligned at the screen edge
-                    $date = if ($e.Kind -eq 'file' -and $e.Date) { $e.Date.ToString('g') } else { '' }
+                    # files carry their modified date right-aligned at the screen
+                    # edge; worktree rows use the same slot for status badges
+                    $date = if ($e.Kind -eq 'file' -and $e.Date) { $e.Date.ToString('g') }
+                            elseif ($e.Kind -eq 'wt' -and $e.Badge) { $e.Badge }
+                            else { '' }
                     if ($i -eq $cursor) {
                         # arrow + enter-symbol hint on the hovered row; built from char codes
                         # because literal unicode garbles under PS 5.1's ANSI script parsing.
@@ -1935,6 +1967,8 @@ function surf {
 
                         'worktrees' {
                             if ($mode -eq 'browse' -or $mode -eq 'results') {
+                                [Console]::SetCursorPosition(0, $rows + 1)
+                                Write-Host (' Reading worktree status...'.PadRight($w - 1)) -ForegroundColor Yellow -NoNewline
                                 $ws = Get-SurfWorktreeState -Dir $path -Prune
                                 if (-not $ws) { $message = 'Not inside a git repository' }
                                 else {

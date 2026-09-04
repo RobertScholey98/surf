@@ -108,6 +108,17 @@ Describe 'ConvertTo-SurfArgString' {
     }
 }
 
+Describe 'Format-SurfWorktreeBadge' {
+    It 'names uncommitted files and unpushed commits, and stays silent when clean' {
+        InModuleScope Surf {
+            Format-SurfWorktreeBadge -Changed 0 -Unpushed 0 | Should -Be ''
+            Format-SurfWorktreeBadge -Changed 3 -Unpushed 0 | Should -Be '3 changed'
+            Format-SurfWorktreeBadge -Changed 0 -Unpushed 2 | Should -Be '2 unpushed'
+            Format-SurfWorktreeBadge -Changed 3 -Unpushed 2 | Should -Be '3 changed, 2 unpushed'
+        }
+    }
+}
+
 Describe 'Resolve-SurfWorktreeRoot' {
     It 'anchors a normal repo at the main worktree, listing every entry as a row' {
         InModuleScope Surf {

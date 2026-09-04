@@ -136,8 +136,10 @@ in the results `Left`/`Esc` return to browsing.
 ## Git worktrees
 
 Anywhere inside a git repo, `W` opens the worktree management area: every worktree
-listed with its branch (main first, the one you're standing in pre-selected), so the
-worktree commands you can never remember become four keys:
+listed with its branch (main first, the one you're standing in pre-selected) and a
+right-hand status badge — `3 changed, 2 unpushed` — showing uncommitted files and
+commits no remote has yet (blank when clean, so a removable worktree is obvious at a
+glance). The worktree commands you can never remember become four keys:
 
 - **Enter** — browse into the selected worktree.
 - **N** — new local branch + worktree. Prompts for a branch name, a base ref
