@@ -145,6 +145,117 @@ Describe 'Surf command store' {
     }
 }
 
+Describe 'Surf updater' {
+    It 'does nothing when the CurrentUser installation is already current' {
+        InModuleScope Surf {
+            Mock Get-Command { [pscustomobject]@{ Name = 'Update-PSResource' } }
+            Mock Find-PSResource { [pscustomobject]@{ Name = 'Surf'; Version = [version]'0.5.3' } }
+            Mock Get-InstalledPSResource { [pscustomobject]@{ Name = 'Surf'; Version = [version]'0.5.3' } }
+            Mock Install-PSResource
+            Mock Update-PSResource
+
+            $result = Update-SurfInstallation
+
+            $result.Status | Should -Be 'Current'
+            $result.PreviousVersion | Should -Be ([version]'0.5.3')
+            $result.Version | Should -Be ([version]'0.5.3')
+            Should -Invoke Install-PSResource -Times 0
+            Should -Invoke Update-PSResource -Times 0
+        }
+    }
+
+    It 'updates an older CurrentUser installation to the Gallery version' {
+        InModuleScope Surf {
+            $script:installedCalls = 0
+            Mock Get-Command { [pscustomobject]@{ Name = 'Update-PSResource' } }
+            Mock Find-PSResource { [pscustomobject]@{ Name = 'Surf'; Version = [version]'0.5.3' } }
+            Mock Get-InstalledPSResource {
+                $script:installedCalls++
+                $version = if ($script:installedCalls -eq 1) { '0.5.2' } else { '0.5.3' }
+                [pscustomobject]@{ Name = 'Surf'; Version = [version]$version }
+            }
+            Mock Install-PSResource
+            Mock Update-PSResource
+
+            $result = Update-SurfInstallation
+
+            $result.Status | Should -Be 'Updated'
+            $result.PreviousVersion | Should -Be ([version]'0.5.2')
+            $result.Version | Should -Be ([version]'0.5.3')
+            Should -Invoke Update-PSResource -Times 1 -ParameterFilter {
+                $Name -eq 'Surf' -and $Version -eq [version]'0.5.3' -and $Scope -eq 'CurrentUser'
+            }
+            Should -Invoke Install-PSResource -Times 0
+        }
+    }
+
+    It 'installs the Gallery release when no CurrentUser copy exists' {
+        InModuleScope Surf {
+            $script:installedCalls = 0
+            Mock Get-Command { [pscustomobject]@{ Name = 'Update-PSResource' } }
+            Mock Find-PSResource { [pscustomobject]@{ Name = 'Surf'; Version = [version]'0.5.3' } }
+            Mock Get-InstalledPSResource {
+                $script:installedCalls++
+                if ($script:installedCalls -gt 1) {
+                    [pscustomobject]@{ Name = 'Surf'; Version = [version]'0.5.3' }
+                }
+            }
+            Mock Install-PSResource
+            Mock Update-PSResource
+
+            $result = Update-SurfInstallation
+
+            $result.Status | Should -Be 'Installed'
+            $result.PreviousVersion | Should -BeNullOrEmpty
+            $result.Version | Should -Be ([version]'0.5.3')
+            Should -Invoke Install-PSResource -Times 1 -ParameterFilter {
+                $Name -eq 'Surf' -and $Version -eq [version]'0.5.3' -and $Scope -eq 'CurrentUser'
+            }
+            Should -Invoke Update-PSResource -Times 0
+        }
+    }
+
+    It 'honours WhatIf without changing the installation' {
+        InModuleScope Surf {
+            Mock Get-Command { [pscustomobject]@{ Name = 'Update-PSResource' } }
+            Mock Find-PSResource { [pscustomobject]@{ Name = 'Surf'; Version = [version]'0.5.3' } }
+            Mock Get-InstalledPSResource { [pscustomobject]@{ Name = 'Surf'; Version = [version]'0.5.2' } }
+            Mock Install-PSResource
+            Mock Update-PSResource
+
+            $result = Update-SurfInstallation -WhatIf
+
+            $result.Status | Should -Be 'Cancelled'
+            Should -Invoke Install-PSResource -Times 0
+            Should -Invoke Update-PSResource -Times 0
+        }
+    }
+
+    It 'explains how to install PSResourceGet when it is unavailable' {
+        InModuleScope Surf {
+            Mock Get-Command { $null }
+
+            { Update-SurfInstallation } | Should -Throw '*Microsoft.PowerShell.PSResourceGet*'
+        }
+    }
+
+    It 'routes surf update through the updater without opening the navigator' {
+        InModuleScope Surf {
+            Mock Update-SurfInstallation {
+                [pscustomobject]@{
+                    Status          = 'Updated'
+                    PreviousVersion = [version]'0.5.2'
+                    Version         = [version]'0.5.3'
+                }
+            }
+
+            surf update 6>$null
+
+            Should -Invoke Update-SurfInstallation -Times 1
+        }
+    }
+}
+
 Describe 'Resolve-SurfKey' {
     It 'returns a run verdict with the command for a bound key' {
         InModuleScope Surf {

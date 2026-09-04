@@ -5,6 +5,7 @@
 #   surf blacklist                    manage blacklisted folders and files
 #   surf add <key> "<command>"        bind a key to a command (-Exit / -Contained skip the prompt)
 #   surf remove <key>                 unbind a key
+#   surf update                       update the CurrentUser installation from PSGallery
 #   surf help                         list built-in keys and custom commands
 #
 # Multi-character keys are chains: 'surf add gs "git status"' means g then s, and
@@ -635,6 +636,69 @@ function Get-SurfBranchPicker {
     return @{ Entries = @(ConvertFrom-SurfRemoteHeads -Text $r.Output); Source = 'remote' }
 }
 
+# Updates only the CurrentUser Gallery installation. An explicitly imported
+# repository copy remains independent, so this is safe to call from a dev shell.
+function Update-SurfInstallation {
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
+    if (-not (Get-Command Update-PSResource -ErrorAction SilentlyContinue)) {
+        throw "surf update requires Microsoft.PowerShell.PSResourceGet. Install it with: Install-Module Microsoft.PowerShell.PSResourceGet -Scope CurrentUser"
+    }
+
+    $available = @(Find-PSResource -Name Surf -Repository PSGallery -ErrorAction Stop) | Select-Object -First 1
+    if (-not $available) { throw 'Surf was not found in the PowerShell Gallery.' }
+    $availableVersion = [version]$available.Version
+
+    $installed = @(Get-InstalledPSResource -Name Surf -Scope CurrentUser -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq 'Surf' } |
+        Sort-Object { [version]$_.Version } -Descending)
+    $previousVersion = if ($installed.Count -gt 0) { [version]$installed[0].Version } else { $null }
+
+    if ($previousVersion -and $previousVersion -ge $availableVersion) {
+        return [pscustomobject]@{
+            Status          = 'Current'
+            PreviousVersion = $previousVersion
+            Version         = $previousVersion
+        }
+    }
+
+    if ($previousVersion) {
+        $operation = 'Update'
+        $status = 'Updated'
+    } else {
+        $operation = 'Install'
+        $status = 'Installed'
+    }
+
+    if (-not $PSCmdlet.ShouldProcess('Surf CurrentUser installation', "$operation version $availableVersion from PSGallery")) {
+        return [pscustomobject]@{
+            Status          = 'Cancelled'
+            PreviousVersion = $previousVersion
+            Version         = $previousVersion
+        }
+    }
+
+    if ($status -eq 'Updated') {
+        Update-PSResource -Name Surf -Version $availableVersion -Repository PSGallery `
+            -Scope CurrentUser -TrustRepository -ErrorAction Stop
+    } else {
+        Install-PSResource -Name Surf -Version $availableVersion -Repository PSGallery `
+            -Scope CurrentUser -TrustRepository -ErrorAction Stop
+    }
+
+    $after = @(Get-InstalledPSResource -Name Surf -Scope CurrentUser -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -eq 'Surf' } |
+        Sort-Object { [version]$_.Version } -Descending)
+    $installedVersion = if ($after.Count -gt 0) { [version]$after[0].Version } else { $availableVersion }
+
+    return [pscustomobject]@{
+        Status          = $status
+        PreviousVersion = $previousVersion
+        Version         = $installedVersion
+    }
+}
+
 function surf {
     param(
         [Parameter(Position = 0)][string]$Command,
@@ -1214,6 +1278,12 @@ function surf {
             }
             'help' {
                 $km = Get-SurfKeymap -Path $script:SurfKeymapFile
+                Write-Host 'Commands:' -ForegroundColor Cyan
+                Write-Host '  surf                 open the navigator'
+                Write-Host '  surf update          update the CurrentUser Gallery installation'
+                Write-Host '  surf blacklist       manage all blocked paths'
+                Write-Host '  surf add/remove      manage custom key commands'
+                Write-Host ''
                 Write-Host 'Built-in keys:' -ForegroundColor Cyan
                 Write-Host '  Up/Down move   Right enter   Left up   Enter cd   Space mark   / jump   ? help'
                 Write-Host ('  {0} favourite   {1} blacklist   {2} new tab   {3} search   Del delete   Esc/{4} quit' -f `
@@ -1235,8 +1305,32 @@ function surf {
                 Write-Host 'Placeholders: {hovered} = item under cursor, {selected} = Space-marked items, {dir} = viewed folder'
                 return
             }
+            'update' {
+                try {
+                    $updateResult = Update-SurfInstallation
+                    switch ($updateResult.Status) {
+                        'Current' {
+                            Write-Host "Surf $($updateResult.Version) is already up to date." -ForegroundColor Green
+                        }
+                        'Installed' {
+                            Write-Host "Installed Surf $($updateResult.Version) from the PowerShell Gallery." -ForegroundColor Green
+                            Write-Host 'Open a new PowerShell session to use the installed release.' -ForegroundColor Yellow
+                        }
+                        'Updated' {
+                            Write-Host "Updated Surf $($updateResult.PreviousVersion) -> $($updateResult.Version)." -ForegroundColor Green
+                            Write-Host 'Open a new PowerShell session to use the updated release.' -ForegroundColor Yellow
+                        }
+                        'Cancelled' {
+                            Write-Host 'Surf update cancelled.' -ForegroundColor Yellow
+                        }
+                    }
+                } catch {
+                    Write-Warning "surf update failed: $($_.Exception.Message)"
+                }
+                return
+            }
             default {
-                Write-Warning "surf: unknown command '$Command' (try: surf add | remove | help | blacklist)"
+                Write-Warning "surf: unknown command '$Command' (try: surf add | remove | update | help | blacklist)"
                 return
             }
         }

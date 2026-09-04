@@ -1,6 +1,8 @@
 # Surf
 
 [![CI](https://github.com/RobertScholey98/surf/actions/workflows/ci.yml/badge.svg)](https://github.com/RobertScholey98/surf/actions/workflows/ci.yml)
+[![PowerShell Gallery](https://img.shields.io/powershellgallery/v/Surf.svg?label=PSGallery)](https://www.powershellgallery.com/packages/Surf)
+[![PowerShell Gallery downloads](https://img.shields.io/powershellgallery/dt/Surf.svg?label=downloads)](https://www.powershellgallery.com/packages/Surf)
 [![GitHub release](https://img.shields.io/github/v/release/RobertScholey98/surf)](https://github.com/RobertScholey98/surf/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
@@ -10,7 +12,7 @@ Surf replaces the repetitive `ls`, `cd`, and `git worktree` commands in a normal
 terminal workflow. Browse with the arrow keys, press Enter to move the calling shell,
 and manage every worktree in the repository without remembering Git's worktree syntax.
 
-[Installation](#installation) · [Quick start](#quick-start) · [Key reference](#key-reference) · [Git worktrees](#git-worktrees) · [Custom commands](#custom-commands)
+[Installation](#installation) · [Updating](#updating) · [Quick start](#quick-start) · [Key reference](#key-reference) · [Git worktrees](#git-worktrees) · [Custom commands](#custom-commands)
 
 ## Why Surf?
 
@@ -28,7 +30,31 @@ and manage every worktree in the repository without remembering Git's worktree s
 
 ## Installation
 
-### Install from GitHub
+### PowerShell 7.4 or newer (recommended)
+
+Surf is published on the [PowerShell Gallery](https://www.powershellgallery.com/packages/Surf):
+
+```powershell
+Install-PSResource Surf -Scope CurrentUser -TrustRepository
+```
+
+PowerShell 7.4 and newer include `Microsoft.PowerShell.PSResourceGet`, the package manager
+used by Surf's built-in updater. PowerShell auto-loads the module the first time you run
+`surf`; no profile import is required.
+
+### Windows PowerShell 5.1 or older PowerShell 7 releases
+
+Surf also supports Windows PowerShell 5.1 and earlier PowerShell 7 releases:
+
+```powershell
+Install-Module Surf -Scope CurrentUser
+```
+
+The `surf update` command requires `Microsoft.PowerShell.PSResourceGet`. Follow Microsoft's
+[package-manager installation guide](https://learn.microsoft.com/powershell/gallery/powershellget/install-powershellget)
+to add it on versions of PowerShell that do not include it.
+
+### Install from GitHub instead
 
 ```powershell
 irm https://raw.githubusercontent.com/RobertScholey98/surf/main/install.ps1 | iex
@@ -50,7 +76,29 @@ the included `Surf` folder into the appropriate module directory:
 - Windows PowerShell 5.1: `Documents\WindowsPowerShell\Modules\`
 - PowerShell 7+: `Documents\PowerShell\Modules\`
 
-PowerShell auto-loads the module the first time you run `surf`.
+### Optional shorthand
+
+Add this to your PowerShell profile if you prefer to launch Surf with `s`:
+
+```powershell
+Set-Alias -Name s -Value surf
+```
+
+## Updating
+
+From version 0.5.3 onward, update the CurrentUser Gallery installation with:
+
+```powershell
+surf update
+```
+
+Surf compares the installed version with the latest stable Gallery release. It installs
+Surf if only a development checkout exists, updates an older installation, and does
+nothing when the installed version is already current. The repository checkout is never
+modified.
+
+Open a new PowerShell session after an update. PowerShell does not replace a module—or
+Surf's compiled process helper—while the current session is still using it.
 
 ## Quick start
 
@@ -77,6 +125,7 @@ Other command-line entry points:
 ```powershell
 surf blacklist                         # manage blocked paths
 surf help                              # print built-in and custom bindings
+surf update                            # update the Gallery installation
 surf add gs "git status" -Contained    # add a custom command
 surf remove gs                         # remove a custom command
 ```
@@ -204,6 +253,26 @@ Press `R` to open the remote picker:
 After a branch is selected, choose the worktree path. Surf fetches the branch, creates a
 local branch with the same name, and configures it to track `origin/<branch>`.
 
+### Git and GitHub authentication
+
+Surf does not store credentials or implement a separate GitHub login. It delegates to
+the tools already configured on the machine:
+
+- Local worktree listing, creation, status, navigation, and removal use `git` and do not
+  require a network connection.
+- Fetching and remote-branch discovery use the repository's `origin` remote. HTTPS
+  credentials come from Git Credential Manager; SSH remotes use the user's SSH setup.
+- The remote picker uses `gh pr list` when GitHub CLI is installed and authenticated. If
+  that query is unavailable, Surf falls back to branches returned by `git ls-remote`.
+- Public repositories can normally fetch without authentication. Private repositories
+  require working Git credentials for remote operations.
+
+Surf disables interactive Git credential prompts while its full-screen UI is active, so
+an unauthenticated or unreachable remote fails instead of leaving Surf hanging. Local
+operations remain available, and local worktree creation can fall back to cached remote
+refs or a local `main`/`master` branch. Surf never pushes a branch; authentication for a
+later `git push` happens normally in the user's terminal.
+
 > **Current limitation:** the selected branch must be fetchable from `origin`. Pull
 > requests whose head branch exists only in a contributor's fork are displayed by the
 > GitHub CLI picker but cannot currently be checked out by Surf.
@@ -261,13 +330,23 @@ consumes `{selected}`, Surf clears the marked set.
 Multi-character bindings form discoverable chains automatically:
 
 ```powershell
-surf add gs "git status" -Contained
-surf add gp "git push" -Contained
+surf add yb "yarn build" -Contained
+surf add yd "yarn dev" -Contained
+surf add yi "yarn install" -Contained
 ```
 
-Pressing `G` opens a small which-key menu for all `g...` commands. Continue the chain to
-run one or press Esc to cancel. A binding cannot be both a complete command and a prefix,
-so Surf rejects ambiguous combinations when they are added.
+Pressing `Y` opens a which-key menu showing the allowable next keys and their commands:
+
+```text
+[y] which key next?
+  b   yarn build
+  d   yarn dev
+  i   yarn install
+```
+
+Continue the chain to run one or press Esc to cancel. Longer chains narrow the menu after
+each prefix. A binding cannot be both a complete command and a prefix, so Surf rejects
+ambiguous combinations when they are added.
 
 If a custom command starts with a built-in key, Surf offers to move that built-in to a
 different free key first. Help text and footers use the resulting keymap automatically.
@@ -310,7 +389,9 @@ only for the lifetime of the current Surf session.
 ## Requirements
 
 - Windows
-- Windows PowerShell 5.1 or PowerShell 7+
+- PowerShell 7.4 or newer recommended
+- Windows PowerShell 5.1 and older PowerShell 7 releases supported
+- `Microsoft.PowerShell.PSResourceGet` for `surf update` (included with PowerShell 7.4+)
 - Git for worktree functionality
 - Optional: [Windows Terminal](https://github.com/microsoft/terminal) for tabs and panes
 - Optional: [GitHub CLI](https://cli.github.com/) for the pull-request picker
@@ -346,9 +427,39 @@ gh auth status
 ```
 
 If the GitHub CLI is unavailable or its query fails, Surf falls back to branches from
-`origin`.
+`origin`. Check Git's access to that remote separately with:
+
+```powershell
+git ls-remote --heads origin
+```
+
+This distinction matters for private repositories: `gh auth status` verifies GitHub CLI,
+while the repository remote may use separate Git Credential Manager or SSH credentials.
 
 ## Development
+
+### Use the release while developing locally
+
+Keep the Gallery installation as the daily driver and import the repository copy only in
+a dedicated development shell. A normal terminal auto-loads the Gallery version when
+`surf` is first called. From the repository, start a separate shell and import the source
+manifest explicitly:
+
+```powershell
+pwsh -NoProfile
+Import-Module .\Surf\Surf.psd1 -Force -ErrorAction Stop
+(Get-Module Surf).Path
+```
+
+Re-run `Import-Module` after editing `Surf.psm1`. Start a fresh development shell after
+editing `SurfJob.cs`, because .NET cannot replace its already-loaded type. Closing the
+development shell returns normal terminals to the Gallery installation. Both copies use
+the same user settings under `%APPDATA%\surf`.
+
+`surf update` always targets the CurrentUser Gallery installation. It never changes files
+inside the repository, even when invoked from an explicitly imported development copy.
+
+### Repository structure
 
 Repository layout:
 

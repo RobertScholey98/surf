@@ -3,7 +3,8 @@ name: Release
 # Releases automatically on every push to main: if no GitHub release exists for the
 # version in Surf.psd1, one is created (tag + zip + generated notes) and the module
 # is published to the PowerShell Gallery (when the PSGALLERY_API_KEY secret is set).
-# Pushes that don't bump ModuleVersion do nothing.
+# GitHub and Gallery existence are checked independently, so a rerun can repair a
+# partially completed release. Pushes that do not bump ModuleVersion normally do nothing.
 
 on:
   push:
@@ -19,29 +20,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Release if ModuleVersion is new
+      - name: Release module version
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
         run: |
+          $ErrorActionPreference = 'Stop'
           $version = (Import-PowerShellDataFile ./Surf/Surf.psd1).ModuleVersion
 
           gh release view "v$version" *> $null
           if ($LASTEXITCODE -eq 0) {
-            Write-Host "Release v$version already exists - nothing to do."
+            Write-Host "GitHub release v$version already exists - skipping its creation."
+          } else {
+            Write-Host "Creating GitHub release v$version"
+            ./build.ps1
+            gh release create "v$version" "dist/Surf-$version.zip" --title "v$version" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'gh release create failed' }
+          }
+
+          $galleryRelease = Find-PSResource -Name Surf -Version $version -Repository PSGallery -ErrorAction SilentlyContinue
+          if ($galleryRelease) {
+            Write-Host "Surf $version already exists in the PowerShell Gallery - skipping publication."
             exit 0
           }
 
-          Write-Host "Creating release v$version"
-          ./build.ps1
+          if (-not $env:PSGALLERY_API_KEY) { throw 'PSGALLERY_API_KEY secret is not set.' }
 
-          gh release create "v$version" "dist/Surf-$version.zip" --title "v$version" --generate-notes
-          if ($LASTEXITCODE -ne 0) { Write-Error 'gh release create failed'; exit 1 }
-
-          if ($env:PSGALLERY_API_KEY) {
-            Publish-Module -Path ./Surf -NuGetApiKey $env:PSGALLERY_API_KEY
-            Write-Host 'Published to the PowerShell Gallery.'
-          } else {
-            Write-Host 'PSGALLERY_API_KEY secret not set - skipping Gallery publish.'
-          }
+          Publish-PSResource -Path ./Surf -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY
+          Write-Host "Published Surf $version to the PowerShell Gallery."
