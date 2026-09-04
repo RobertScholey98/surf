@@ -125,6 +125,7 @@ Other command-line entry points:
 ```powershell
 surf blacklist                         # manage blocked paths
 surf help                              # print built-in and custom bindings
+surf -v                                # print the loaded Surf version
 surf update                            # update the Gallery installation
 surf add gs "git status" -Contained    # add a custom command
 surf remove gs                         # remove a custom command

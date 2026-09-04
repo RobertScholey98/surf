@@ -6,6 +6,7 @@
 #   surf add <key> "<command>"        bind a key to a command (-Exit / -Contained skip the prompt)
 #   surf remove <key>                 unbind a key
 #   surf update                       update the CurrentUser installation from PSGallery
+#   surf -v | surf version            print the loaded Surf version
 #   surf help                         list built-in keys and custom commands
 #
 # Multi-character keys are chains: 'surf add gs "git status"' means g then s, and
@@ -707,8 +708,13 @@ function surf {
         [switch]$Exit,
         [switch]$Contained,
         [switch]$Background,
-        [switch]$Pane
+        [switch]$Pane,
+        [Alias('v')][switch]$Version
     )
+
+    if ($Version -or $Command -eq 'version') {
+        return "Surf $($MyInvocation.MyCommand.Module.Version)"
+    }
 
     function New-SurfEntry($name, $kind, $full, $fav, $date) {
         [pscustomobject]@{ Name = $name; Kind = $kind; FullPath = $full; Fav = [bool]$fav; Date = $date }
@@ -1280,6 +1286,7 @@ function surf {
                 $km = Get-SurfKeymap -Path $script:SurfKeymapFile
                 Write-Host 'Commands:' -ForegroundColor Cyan
                 Write-Host '  surf                 open the navigator'
+                Write-Host '  surf -v / version    print the loaded Surf version'
                 Write-Host '  surf update          update the CurrentUser Gallery installation'
                 Write-Host '  surf blacklist       manage all blocked paths'
                 Write-Host '  surf add/remove      manage custom key commands'

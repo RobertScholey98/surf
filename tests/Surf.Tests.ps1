@@ -256,6 +256,26 @@ Describe 'Surf updater' {
     }
 }
 
+Describe 'Surf version command' {
+    It 'reports the loaded module version with -v' {
+        InModuleScope Surf {
+            surf -v | Should -Be "Surf $((Get-Module Surf).Version)"
+        }
+    }
+
+    It 'reports the loaded module version with -Version' {
+        InModuleScope Surf {
+            surf -Version | Should -Be "Surf $((Get-Module Surf).Version)"
+        }
+    }
+
+    It 'also accepts the version subcommand' {
+        InModuleScope Surf {
+            surf version | Should -Be "Surf $((Get-Module Surf).Version)"
+        }
+    }
+}
+
 Describe 'Resolve-SurfKey' {
     It 'returns a run verdict with the command for a bound key' {
         InModuleScope Surf {
